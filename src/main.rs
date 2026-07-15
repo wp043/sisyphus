@@ -8,6 +8,7 @@ mod db;
 mod draft;
 mod mine;
 mod normalize;
+mod tui;
 
 use std::io::{IsTerminal, Write};
 
@@ -27,11 +28,17 @@ enum Cmd {
     Ingest,
     /// Show what has been ingested
     Stats,
-    /// Mine history for repeated workflows and show the top candidates
+    /// Mine history for repeated workflows and review them (full-screen TUI)
     Report {
-        /// How many patterns to show
+        /// How many patterns to show per kind
         #[arg(short, long, default_value_t = 10)]
         limit: usize,
+        /// Draft ALL undecided patterns with claude and install every draft
+        #[arg(long)]
+        auto: bool,
+        /// Plain line-by-line output instead of the TUI
+        #[arg(long)]
+        plain: bool,
     },
     /// Draft an automation for one pattern and print it (no install)
     Draft {
@@ -81,7 +88,15 @@ fn main() -> Result<()> {
             );
         }
         Cmd::Stats => stats(&conn)?,
-        Cmd::Report { limit } => report(&conn, limit)?,
+        Cmd::Report { limit, auto, plain } => {
+            if auto {
+                report_auto(&conn, limit)?;
+            } else if plain || !std::io::stdin().is_terminal() {
+                report(&conn, limit)?;
+            } else {
+                tui::run(&conn, limit)?;
+            }
+        }
         Cmd::Draft { id } => {
             let (kind, seq, count): (String, String, i64) = conn.query_row(
                 "SELECT kind, template_seq, count FROM patterns WHERE id = ?1",
@@ -235,6 +250,62 @@ fn watch(install: bool, uninstall: bool) -> Result<()> {
     Ok(())
 }
 
+/// Draft every undecided pattern in parallel (3 claude workers) and install
+/// whatever parses cleanly. The trust-the-machine mode.
+fn report_auto(conn: &rusqlite::Connection, limit: usize) -> Result<()> {
+    let cands = mine::candidates(conn, limit)?;
+    if cands.is_empty() {
+        println!("no undecided patterns — nothing to draft");
+        return Ok(());
+    }
+    println!("drafting {} pattern(s) with 3 claude workers…\n", cands.len());
+    let prompts: Vec<String> = cands
+        .iter()
+        .map(|c| draft::prepare_prompt(conn, &c.kind, &c.templates, c.count))
+        .collect::<Result<_>>()?;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (mut ok, mut failed) = (0usize, 0usize);
+    std::thread::scope(|s| -> Result<()> {
+        for w in 0..3usize {
+            let tx = tx.clone();
+            let prompts = &prompts;
+            s.spawn(move || {
+                for idx in (w..prompts.len()).step_by(3) {
+                    let _ = tx.send((idx, draft::run_claude(&prompts[idx])));
+                }
+            });
+        }
+        drop(tx);
+        for (idx, result) in rx {
+            let c = &cands[idx];
+            match result {
+                Ok(d) => match draft::install(&d) {
+                    Ok(path) => {
+                        decide(conn, c.id, "accepted", Some(path.display().to_string()))?;
+                        ok += 1;
+                        println!("✓ {} ({}) — {}\n    → {}", d.name, d.kind, d.summary, path.display());
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        println!("✗ {} — install failed: {e:#}", d.name);
+                    }
+                },
+                Err(e) => {
+                    failed += 1;
+                    println!("✗ pattern {} — draft failed: {e:#}", c.id);
+                }
+            }
+        }
+        Ok(())
+    })?;
+    println!("\n{ok} installed, {failed} failed — `sisyphus gain` will track adoption");
+    if ok > 0 {
+        println!("aliases (if any) need: source ~/.config/sisyphus/aliases.zsh");
+    }
+    Ok(())
+}
+
 fn report(conn: &rusqlite::Connection, limit: usize) -> Result<()> {
     let cands = mine::candidates(conn, limit)?;
     if cands.is_empty() {
@@ -336,23 +407,7 @@ fn edit_in_editor(content: &str) -> Result<Option<String>> {
     Ok(Some(edited))
 }
 
-fn decide(conn: &rusqlite::Connection, id: i64, decision: &str, path: Option<String>) -> Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-    // snapshot where history stands, so evolve can see what happened *after*
-    let max_cmd: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM commands", [], |r| r.get(0))?;
-    let count: i64 = conn
-        .query_row("SELECT count FROM patterns WHERE id = ?1", [id], |r| r.get(0))
-        .unwrap_or(0);
-    conn.execute(
-        "INSERT OR REPLACE INTO decisions
-         (pattern_id, decision, artifact_path, ts, at_command_id, count_at_decision)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![id, decision, path, now, max_cmd, count],
-    )?;
-    Ok(())
-}
+use db::decide;
 
 struct EvolveFinding {
     pattern_id: i64,

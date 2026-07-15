@@ -66,9 +66,32 @@ pub fn open() -> Result<Connection> {
         "#,
     )?;
     // migrations for DBs created before these columns existed
+    migrate(&conn);
+    Ok(conn)
+}
+
+fn migrate(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE commands ADD COLUMN failed INTEGER", []);
     // where history stood when the user decided — everything after is "since"
     let _ = conn.execute("ALTER TABLE decisions ADD COLUMN at_command_id INTEGER", []);
     let _ = conn.execute("ALTER TABLE decisions ADD COLUMN count_at_decision INTEGER", []);
-    Ok(conn)
+}
+
+/// Record the user's decision on a pattern, snapshotting where history stands
+/// so `evolve` can later see what happened after.
+pub fn decide(conn: &Connection, pattern_id: i64, decision: &str, path: Option<String>) -> Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let max_cmd: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM commands", [], |r| r.get(0))?;
+    let count: i64 = conn
+        .query_row("SELECT count FROM patterns WHERE id = ?1", [pattern_id], |r| r.get(0))
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT OR REPLACE INTO decisions
+         (pattern_id, decision, artifact_path, ts, at_command_id, count_at_decision)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![pattern_id, decision, path, now, max_cmd, count],
+    )?;
+    Ok(())
 }

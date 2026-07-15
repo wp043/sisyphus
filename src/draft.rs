@@ -64,18 +64,27 @@ Respond with STRICT JSON only, no markdown fences, matching:
     )
 }
 
-pub fn draft_pattern(conn: &Connection, kind: &str, templates: &[String], count: usize) -> Result<Draft> {
+/// Build the full drafting prompt. Needs the DB (for examples); the actual
+/// claude call in `run_claude` doesn't, so calls can run on worker threads.
+pub fn prepare_prompt(conn: &Connection, kind: &str, templates: &[String], count: usize) -> Result<String> {
     let ex = if kind == "prompt" { String::new() } else { examples(conn, templates)? };
-    let prompt = build_prompt(kind, templates, count, &ex);
+    Ok(build_prompt(kind, templates, count, &ex))
+}
+
+/// One headless claude call → parsed draft. Thread-safe; no DB access.
+pub fn run_claude(prompt: &str) -> Result<Draft> {
     let out = Command::new("claude")
-        .args(["-p", &prompt])
+        .args(["-p", prompt])
         .output()
         .context("failed to run `claude` — is Claude Code installed and on PATH?")?;
     if !out.status.success() {
         bail!("claude -p failed: {}", String::from_utf8_lossy(&out.stderr));
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    parse_draft(&text)
+    parse_draft(&String::from_utf8_lossy(&out.stdout))
+}
+
+pub fn draft_pattern(conn: &Connection, kind: &str, templates: &[String], count: usize) -> Result<Draft> {
+    run_claude(&prepare_prompt(conn, kind, templates, count)?)
 }
 
 fn parse_draft(text: &str) -> Result<Draft> {

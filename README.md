@@ -11,26 +11,16 @@ Everything stays local: history is ingested into a SQLite DB on your machine, an
 ```sh
 sisyphus ingest      # incrementally pull new history from all sources
 sisyphus stats       # what's been ingested, top command templates
-sisyphus report      # mine patterns, then interactively draft/accept/ignore
+sisyphus report      # full-screen TUI: browse patterns, draft, accept
+sisyphus report --auto   # draft ALL patterns in parallel and install them
+sisyphus report --plain  # old-school line-by-line output
 sisyphus draft <id>  # draft one pattern non-interactively (no install)
 sisyphus gain        # are accepted automations actually being used?
 sisyphus evolve      # act on adoption feedback: revise, retire, resurface
 sisyphus watch --install  # hourly background scan; notifies on new patterns
 ```
 
-Example:
-
-```
-⚡ #1 (pattern 2) — seen 6× · score 12
-     git remote add origin <path>
-   → git branch -M main
-   → git push -u origin main
-
-pattern #1 (6×): [d]raft with claude / [i]gnore forever / [s]kip / [q]uit? d
-── git-publish (script) — connects a repo to a remote and pushes main in one command
-[a]ccept / [e]dit / [i]gnore forever / [s]kip? a
-  ✓ installed: ~/.local/bin/git-publish
-```
+`report` opens a two-pane TUI: pattern list on the left (⚡/🔁/💬 with live state dots), details and draft preview on the right. `j/k` move, `d` drafts the selected pattern on a background claude worker (3 run in parallel), `a` installs, `i` ignores forever, `A` drafts **and installs everything** — the trust-the-machine button. `--auto` does the same without the UI.
 
 ## Sources
 
