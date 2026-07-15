@@ -11,7 +11,7 @@ mod normalize;
 
 use std::io::{IsTerminal, Write};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -37,6 +37,17 @@ enum Cmd {
     Draft {
         /// Pattern id as shown by `report`
         id: i64,
+    },
+    /// Show whether accepted automations are actually being used
+    Gain,
+    /// Ingest + mine silently; macOS-notify if a new high-value pattern appeared
+    Scan,
+    /// Manage the hourly background scan (launchd)
+    Watch {
+        #[arg(long)]
+        install: bool,
+        #[arg(long)]
+        uninstall: bool,
     },
 }
 
@@ -69,32 +80,172 @@ fn main() -> Result<()> {
         Cmd::Stats => stats(&conn)?,
         Cmd::Report { limit } => report(&conn, limit)?,
         Cmd::Draft { id } => {
-            let (seq, count): (String, i64) = conn.query_row(
-                "SELECT template_seq, count FROM patterns WHERE id = ?1",
+            let (kind, seq, count): (String, String, i64) = conn.query_row(
+                "SELECT kind, template_seq, count FROM patterns WHERE id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
             let templates: Vec<String> = serde_json::from_str(&seq)?;
-            let d = draft::draft_pattern(&conn, &templates, count as usize)?;
+            let d = draft::draft_pattern(&conn, &kind, &templates, count as usize)?;
             println!("── {} ({}) — {}\n{}", d.name, d.kind, d.summary, d.content);
         }
+        Cmd::Gain => gain(&conn)?,
+        Cmd::Scan => scan(&conn)?,
+        Cmd::Watch { install, uninstall } => watch(install, uninstall)?,
+    }
+    Ok(())
+}
+
+fn gain(conn: &rusqlite::Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT d.artifact_path, p.template_seq, p.count FROM decisions d
+         JOIN patterns p ON p.id = d.pattern_id
+         WHERE d.decision = 'accepted' AND d.artifact_path IS NOT NULL",
+    )?;
+    let rows: Vec<(String, String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    if rows.is_empty() {
+        println!("no accepted automations yet — run `sisyphus report`");
+        return Ok(());
+    }
+    let mut total_steps_saved = 0i64;
+    for (path, seq, _) in &rows {
+        let name = std::path::Path::new(path)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let steps: i64 = serde_json::from_str::<Vec<String>>(seq).map(|v| v.len() as i64).unwrap_or(1);
+        let uses: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM commands WHERE head = ?1",
+            [&name],
+            |r| r.get(0),
+        )?;
+        let saved = uses * (steps - 1).max(0);
+        total_steps_saved += saved;
+        println!("{name:<24} used {uses}× · replaces {steps} steps · {saved} manual steps avoided");
+    }
+    println!("\ntotal manual steps avoided: {total_steps_saved}");
+    Ok(())
+}
+
+fn scan(conn: &rusqlite::Connection) -> Result<()> {
+    const NOTIFY_THRESHOLD: f64 = 8.0;
+    let cands = mine::candidates(conn, 5)?;
+    let mut fresh = Vec::new();
+    for c in &cands {
+        if c.score < NOTIFY_THRESHOLD {
+            continue;
+        }
+        let seen: bool = conn
+            .query_row("SELECT 1 FROM notified WHERE pattern_id = ?1", [c.id], |_| Ok(true))
+            .unwrap_or(false);
+        if !seen {
+            fresh.push(c);
+        }
+    }
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    for c in &fresh {
+        conn.execute(
+            "INSERT OR IGNORE INTO notified (pattern_id, ts) VALUES (?1, ?2)",
+            rusqlite::params![c.id, now],
+        )?;
+    }
+    let top = fresh[0];
+    let msg = format!(
+        "{} automatable pattern(s) found — top: {} ({}×). Run `sisyphus report`.",
+        fresh.len(),
+        top.templates.join(" → ").chars().take(80).collect::<String>(),
+        top.count
+    );
+    println!("{msg}");
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"sisyphus\"",
+            msg.replace('"', "'")
+        );
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+    }
+    Ok(())
+}
+
+fn watch(install: bool, uninstall: bool) -> Result<()> {
+    let plist_path = dirs::home_dir()
+        .context("no home dir")?
+        .join("Library/LaunchAgents/dev.sisyphus.scan.plist");
+    if uninstall {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &plist_path.display().to_string()])
+            .status();
+        let _ = std::fs::remove_file(&plist_path);
+        println!("watch removed");
+        return Ok(());
+    }
+    if !install {
+        println!(
+            "installed: {}",
+            if plist_path.exists() { "yes" } else { "no — run `sisyphus watch --install`" }
+        );
+        return Ok(());
+    }
+    let bin = std::env::current_exe()?;
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>Label</key><string>dev.sisyphus.scan</string>
+    <key>ProgramArguments</key>
+    <array><string>/bin/sh</string><string>-c</string>
+    <string>"{bin}" ingest >/dev/null 2>&1 && "{bin}" scan</string></array>
+    <key>StartInterval</key><integer>3600</integer>
+    <key>RunAtLoad</key><false/>
+</dict></plist>
+"#,
+        bin = bin.display()
+    );
+    std::fs::create_dir_all(plist_path.parent().unwrap())?;
+    std::fs::write(&plist_path, plist)?;
+    let status = std::process::Command::new("launchctl")
+        .args(["load", &plist_path.display().to_string()])
+        .status()?;
+    if status.success() {
+        println!("✓ hourly background scan installed ({})", plist_path.display());
+        println!("  note: uses the current binary path — reinstall after `cargo install`");
+    } else {
+        anyhow::bail!("launchctl load failed");
     }
     Ok(())
 }
 
 fn report(conn: &rusqlite::Connection, limit: usize) -> Result<()> {
-    let patterns = mine::mine(conn)?;
-    let top = mine::store_and_rank(conn, &patterns, limit)?;
-    if top.is_empty() {
+    let cands = mine::candidates(conn, limit)?;
+    if cands.is_empty() {
         println!("no undecided patterns found — ingest more history or lower thresholds");
         return Ok(());
     }
-    for (rank, (id, idx)) in top.iter().enumerate() {
-        let p = &patterns[*idx];
-        println!("\n⚡ #{} (pattern {id}) — seen {}× · score {:.0}", rank + 1, p.count, p.score);
-        for (i, tpl) in p.templates.iter().enumerate() {
+    let mut last_kind = "";
+    for (rank, c) in cands.iter().enumerate() {
+        if c.kind != last_kind {
+            last_kind = &c.kind;
+            let header = match c.kind.as_str() {
+                "sequence" => "⚡ repeated workflows",
+                "fixloop" => "🔁 fix-loops (execute → fail → fix → retry)",
+                "prompt" => "💬 things you keep asking AI tools",
+                _ => &c.kind,
+            };
+            println!("\n{header}");
+        }
+        println!("\n  #{} (pattern {}) — seen {}× · score {:.0}", rank + 1, c.id, c.count, c.score);
+        for (i, tpl) in c.templates.iter().enumerate() {
             let arrow = if i == 0 { " " } else { "→" };
-            println!("   {arrow} {tpl}");
+            println!("     {arrow} {tpl}");
         }
     }
     if !std::io::stdin().is_terminal() {
@@ -102,15 +253,14 @@ fn report(conn: &rusqlite::Connection, limit: usize) -> Result<()> {
         return Ok(());
     }
     println!();
-    for (rank, (id, idx)) in top.iter().enumerate() {
-        let p = &patterns[*idx];
+    for (rank, c) in cands.iter().enumerate() {
         match ask(&format!(
-            "pattern #{} ({}×): [d]raft with claude / [i]gnore forever / [s]kip / [q]uit? ",
+            "#{} ({}×): [d]raft with claude / [i]gnore forever / [s]kip / [q]uit? ",
             rank + 1,
-            p.count
+            c.count
         ))? {
-            'd' => review_draft(conn, *id, p)?,
-            'i' => decide(conn, *id, "ignored", None)?,
+            'd' => review_draft(conn, c)?,
+            'i' => decide(conn, c.id, "ignored", None)?,
             'q' => break,
             _ => {}
         }
@@ -118,9 +268,10 @@ fn report(conn: &rusqlite::Connection, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn review_draft(conn: &rusqlite::Connection, id: i64, p: &mine::Pattern) -> Result<()> {
+fn review_draft(conn: &rusqlite::Connection, c: &mine::Candidate) -> Result<()> {
+    let (id, p) = (c.id, c);
     println!("  drafting via claude -p …");
-    let mut d = match draft::draft_pattern(conn, &p.templates, p.count) {
+    let mut d = match draft::draft_pattern(conn, &c.kind, &p.templates, p.count) {
         Ok(d) => d,
         Err(e) => {
             println!("  draft failed: {e:#}");

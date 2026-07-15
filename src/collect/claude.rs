@@ -75,6 +75,7 @@ fn ingest_file(conn: &Connection, path: &Path, project: &str) -> Result<(usize, 
     )?;
 
     let (mut cmds, mut prompts) = (0usize, 0usize);
+    let mut call_rows: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut line_no: i64 = -1;
     for line in reader.lines() {
         line_no += 1;
@@ -95,14 +96,36 @@ fn ingest_file(conn: &Connection, path: &Path, project: &str) -> Result<(usize, 
                     if block["type"] == "tool_use" && block["name"] == "Bash" {
                         if let Some(cmd) = block["input"]["command"].as_str() {
                             let head = cmd.split_whitespace().next().unwrap_or("");
-                            cmds += cmd_stmt.execute(params![
+                            let n = cmd_stmt.execute(params![
                                 "claude", cmd, head, ts, cwd, project, session_key, line_no
                             ])?;
+                            cmds += n;
+                            if n > 0 {
+                                if let Some(id) = block["id"].as_str() {
+                                    call_rows.insert(id.to_string(), conn.last_insert_rowid());
+                                }
+                            }
                         }
                     }
                 }
             }
             Some("user") => {
+                // tool results ride in user messages; mark failed commands
+                if let Some(blocks) = v["message"]["content"].as_array() {
+                    for block in blocks {
+                        if block["type"] == "tool_result" && block["is_error"] == true {
+                            if let Some(row) = block["tool_use_id"]
+                                .as_str()
+                                .and_then(|id| call_rows.get(id))
+                            {
+                                conn.execute(
+                                    "UPDATE commands SET failed = 1 WHERE id = ?1",
+                                    params![row],
+                                )?;
+                            }
+                        }
+                    }
+                }
                 if v["isMeta"].as_bool() == Some(true) {
                     continue;
                 }

@@ -57,7 +57,15 @@ pub fn open() -> Result<Connection> {
             artifact_path TEXT,
             ts            INTEGER NOT NULL
         );
+
+        -- patterns the ambient scan has already notified about
+        CREATE TABLE IF NOT EXISTS notified (
+            pattern_id INTEGER PRIMARY KEY REFERENCES patterns(id),
+            ts         INTEGER NOT NULL
+        );
         "#,
     )?;
+    // migration for DBs created before failure tracking existed
+    let _ = conn.execute("ALTER TABLE commands ADD COLUMN failed INTEGER", []);
     Ok(conn)
 }

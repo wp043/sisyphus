@@ -166,29 +166,142 @@ pub fn mine(conn: &Connection) -> Result<Vec<Pattern>> {
     Ok(patterns)
 }
 
-/// Persist mined patterns (upsert on the template sequence) and return the
-/// top patterns that the user has not already ignored or accepted.
-pub fn store_and_rank(conn: &Connection, patterns: &[Pattern], limit: usize) -> Result<Vec<(i64, usize)>> {
+/// A repeated same-command retry cycle inside agent sessions: the command was
+/// re-run after failures, meaning an agent (or the user) sat in an
+/// execute→fix→retry loop.
+pub fn fix_loops(conn: &Connection) -> Result<Vec<Pattern>> {
+    let mut stmt = conn.prepare(
+        "SELECT template, SUM(runs), SUM(fails), COUNT(*) FROM (
+            SELECT template, COUNT(*) runs, SUM(COALESCE(failed, 0)) fails
+            FROM commands
+            WHERE source IN ('claude', 'codex') AND template IS NOT NULL
+            GROUP BY source, session_key, template
+            HAVING runs >= 3 AND fails >= 2
+         ) GROUP BY template ORDER BY SUM(runs) DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(3)?))
+    })?;
     let mut out = Vec::new();
-    for (i, p) in patterns.iter().enumerate() {
-        let key = serde_json::to_string(&p.templates)?;
-        conn.execute(
-            "INSERT INTO patterns (kind, template_seq, count, score) VALUES ('sequence', ?1, ?2, ?3)
-             ON CONFLICT(template_seq) DO UPDATE SET count = ?2, score = ?3",
-            params![key, p.count as i64, p.score],
-        )?;
-        let id: i64 = conn.query_row(
-            "SELECT id FROM patterns WHERE template_seq = ?1",
-            params![key],
-            |r| r.get(0),
-        )?;
-        let decided: bool = conn
-            .query_row("SELECT 1 FROM decisions WHERE pattern_id = ?1", params![id], |_| Ok(true))
-            .unwrap_or(false);
-        if !decided {
-            out.push((id, i));
-            if out.len() >= limit {
-                break;
+    for row in rows {
+        let (template, runs, sessions) = row?;
+        if is_noise(&template) {
+            continue;
+        }
+        out.push(Pattern {
+            templates: vec![template],
+            count: runs as usize,
+            score: runs as f64 * sessions as f64,
+        });
+    }
+    Ok(out)
+}
+
+fn word_set(text: &str) -> std::collections::HashSet<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 3)
+        .map(String::from)
+        .collect()
+}
+
+/// Cluster near-duplicate prompts across all AI tools: asking the same kind of
+/// thing 3+ times is a skill waiting to exist. Jaccard similarity over word
+/// sets; O(n²) is fine at personal-history scale.
+pub fn prompt_clusters(conn: &Connection) -> Result<Vec<Pattern>> {
+    let mut stmt = conn.prepare(
+        "SELECT raw FROM commands
+         WHERE source LIKE '%_prompt' AND LENGTH(raw) BETWEEN 12 AND 300",
+    )?;
+    let prompts: Vec<String> = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    let sets: Vec<_> = prompts.iter().map(|p| word_set(p)).collect();
+
+    // union-find over similar pairs
+    let mut parent: Vec<usize> = (0..prompts.len()).collect();
+    fn find(parent: &mut Vec<usize>, i: usize) -> usize {
+        if parent[i] != i {
+            parent[i] = find(parent, parent[i]);
+        }
+        parent[i]
+    }
+    for i in 0..prompts.len() {
+        for j in i + 1..prompts.len() {
+            let inter = sets[i].intersection(&sets[j]).count();
+            let union = sets[i].len() + sets[j].len() - inter;
+            if union > 0 && inter as f64 / union as f64 >= 0.5 {
+                let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                if ri != rj {
+                    parent[ri] = rj;
+                }
+            }
+        }
+    }
+    let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..prompts.len() {
+        let root = find(&mut parent, i);
+        clusters.entry(root).or_default().push(i);
+    }
+    let mut out: Vec<Pattern> = clusters
+        .into_values()
+        .filter(|members| members.len() >= 3)
+        .map(|members| {
+            let count = members.len();
+            // shortest member reads as the cleanest statement of the intent
+            let rep = members
+                .into_iter()
+                .map(|i| prompts[i].clone())
+                .min_by_key(|p| p.len())
+                .unwrap_or_default();
+            Pattern { templates: vec![rep], count, score: count as f64 * 2.0 }
+        })
+        .collect();
+    out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    Ok(out)
+}
+
+pub struct Candidate {
+    pub id: i64,
+    pub kind: String,
+    pub templates: Vec<String>,
+    pub count: usize,
+    pub score: f64,
+}
+
+/// Mine everything, persist patterns, and return the undecided candidates.
+pub fn candidates(conn: &Connection, limit_per_kind: usize) -> Result<Vec<Candidate>> {
+    let mut out = Vec::new();
+    for (kind, patterns) in [
+        ("sequence", mine(conn)?),
+        ("fixloop", fix_loops(conn)?),
+        ("prompt", prompt_clusters(conn)?),
+    ] {
+        let mut kept = 0;
+        for p in patterns {
+            let key = serde_json::to_string(&p.templates)?;
+            conn.execute(
+                "INSERT INTO patterns (kind, template_seq, count, score) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(template_seq) DO UPDATE SET count = ?3, score = ?4",
+                params![kind, key, p.count as i64, p.score],
+            )?;
+            let id: i64 = conn.query_row(
+                "SELECT id FROM patterns WHERE template_seq = ?1",
+                params![key],
+                |r| r.get(0),
+            )?;
+            let decided: bool = conn
+                .query_row("SELECT 1 FROM decisions WHERE pattern_id = ?1", params![id], |_| Ok(true))
+                .unwrap_or(false);
+            if !decided && kept < limit_per_kind {
+                kept += 1;
+                out.push(Candidate {
+                    id,
+                    kind: kind.into(),
+                    templates: p.templates,
+                    count: p.count,
+                    score: p.score,
+                });
             }
         }
     }
@@ -204,7 +317,7 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE commands (id INTEGER PRIMARY KEY, source TEXT, raw TEXT, template TEXT,
              head TEXT, ts INTEGER, duration_ms INTEGER, cwd TEXT, project TEXT,
-             session_key TEXT, seq INTEGER);
+             session_key TEXT, seq INTEGER, failed INTEGER);
              CREATE TABLE patterns (id INTEGER PRIMARY KEY, kind TEXT, template_seq TEXT UNIQUE,
              count INTEGER, score REAL, first_ts INTEGER, last_ts INTEGER);
              CREATE TABLE decisions (pattern_id INTEGER PRIMARY KEY, decision TEXT,
@@ -248,6 +361,44 @@ mod tests {
         let conn = conn_with(&rows);
         let patterns = mine(&conn).unwrap();
         assert!(patterns.is_empty(), "{:?}", patterns.iter().map(|p| &p.templates).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn detects_fix_loop() {
+        let conn = conn_with(&[]);
+        for i in 0..4 {
+            conn.execute(
+                "INSERT INTO commands (source, raw, template, session_key, seq, failed) VALUES ('claude', 'cargo build', 'cargo build', 's1', ?1, ?2)",
+                params![i, (i < 2) as i64],
+            )
+            .unwrap();
+        }
+        let loops = fix_loops(&conn).unwrap();
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].templates, vec!["cargo build".to_string()]);
+        assert_eq!(loops[0].count, 4);
+    }
+
+    #[test]
+    fn clusters_similar_prompts() {
+        let conn = conn_with(&[]);
+        let prompts = [
+            "summarize this PR and check the types please",
+            "summarize the PR then check types",
+            "please summarize this PR and check its types",
+            "write a haiku about rust",
+        ];
+        for (i, p) in prompts.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO commands (source, raw, session_key, seq) VALUES ('claude_prompt', ?1, 's1', ?2)",
+                params![p, i as i64],
+            )
+            .unwrap();
+        }
+        let clusters = prompt_clusters(&conn).unwrap();
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].count, 3);
+        assert!(clusters[0].templates[0].contains("summarize"));
     }
 
     #[test]

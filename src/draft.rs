@@ -30,11 +30,25 @@ fn examples(conn: &Connection, templates: &[String]) -> Result<String> {
     Ok(out)
 }
 
-fn build_prompt(templates: &[String], count: usize, examples: &str) -> String {
+fn build_prompt(kind: &str, templates: &[String], count: usize, examples: &str) -> String {
+    let situation = match kind {
+        "fixloop" => format!(
+            "This command was re-run {count} times across the developer's AI-agent sessions, failing and being fixed in between — a manual execute→fix→retry loop:\n\n{}\n\nDraft a Claude Code skill (kind \"skill\") that automates the whole loop: run the command, read the errors, fix the cause, re-run, max 3 retries, then report. SKILL.md format with `name:` and `description:` frontmatter, where description states WHEN to auto-trigger.",
+            templates.join("\n")
+        ),
+        "prompt" => format!(
+            "The developer has typed essentially this same request to AI coding tools {count} separate times:\n\n\"{}\"\n\nDraft a Claude Code skill (kind \"skill\") that captures this recurring intent so it becomes a one-word command. SKILL.md format with `name:` and `description:` frontmatter.",
+            templates.join("\n")
+        ),
+        _ => format!(
+            "The developer has manually repeated this command sequence {count} times (mined from their real shell/agent history):\n\n{}",
+            templates.join("\n")
+        ),
+    };
     format!(
-        r#"You are drafting an automation for a developer who has manually repeated this command sequence {count} times (mined from their real shell/agent history):
+        r#"You are drafting an automation for a developer.
 
-{}
+{situation}
 
 Concrete examples of each step from their history:
 {examples}
@@ -47,12 +61,12 @@ Draft the best automation. Rules:
 
 Respond with STRICT JSON only, no markdown fences, matching:
 {{"name": "...", "kind": "script|alias|skill", "summary": "...", "content": "full artifact text"}}"#,
-        templates.join("\n"),
     )
 }
 
-pub fn draft_pattern(conn: &Connection, templates: &[String], count: usize) -> Result<Draft> {
-    let prompt = build_prompt(templates, count, &examples(conn, templates)?);
+pub fn draft_pattern(conn: &Connection, kind: &str, templates: &[String], count: usize) -> Result<Draft> {
+    let ex = if kind == "prompt" { String::new() } else { examples(conn, templates)? };
+    let prompt = build_prompt(kind, templates, count, &ex);
     let out = Command::new("claude")
         .args(["-p", &prompt])
         .output()
