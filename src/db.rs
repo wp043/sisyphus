@@ -65,7 +65,10 @@ pub fn open() -> Result<Connection> {
         );
         "#,
     )?;
-    // migration for DBs created before failure tracking existed
+    // migrations for DBs created before these columns existed
     let _ = conn.execute("ALTER TABLE commands ADD COLUMN failed INTEGER", []);
+    // where history stood when the user decided — everything after is "since"
+    let _ = conn.execute("ALTER TABLE decisions ADD COLUMN at_command_id INTEGER", []);
+    let _ = conn.execute("ALTER TABLE decisions ADD COLUMN count_at_decision INTEGER", []);
     Ok(conn)
 }

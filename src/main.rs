@@ -40,6 +40,9 @@ enum Cmd {
     },
     /// Show whether accepted automations are actually being used
     Gain,
+    /// Act on adoption feedback: revise unused artifacts, resurface ignored
+    /// patterns that kept growing
+    Evolve,
     /// Ingest + mine silently; macOS-notify if a new high-value pattern appeared
     Scan,
     /// Manage the hourly background scan (launchd)
@@ -90,6 +93,7 @@ fn main() -> Result<()> {
             println!("── {} ({}) — {}\n{}", d.name, d.kind, d.summary, d.content);
         }
         Cmd::Gain => gain(&conn)?,
+        Cmd::Evolve => evolve(&conn)?,
         Cmd::Scan => scan(&conn)?,
         Cmd::Watch { install, uninstall } => watch(install, uninstall)?,
     }
@@ -145,7 +149,8 @@ fn scan(conn: &rusqlite::Connection) -> Result<()> {
             fresh.push(c);
         }
     }
-    if fresh.is_empty() {
+    let evolve_count = evolve_findings(conn)?.len();
+    if fresh.is_empty() && evolve_count == 0 {
         return Ok(());
     }
     let now = std::time::SystemTime::now()
@@ -157,13 +162,19 @@ fn scan(conn: &rusqlite::Connection) -> Result<()> {
             rusqlite::params![c.id, now],
         )?;
     }
-    let top = fresh[0];
-    let msg = format!(
-        "{} automatable pattern(s) found — top: {} ({}×). Run `sisyphus report`.",
-        fresh.len(),
-        top.templates.join(" → ").chars().take(80).collect::<String>(),
-        top.count
-    );
+    let msg = match (fresh.first(), evolve_count) {
+        (Some(top), 0) => format!(
+            "{} automatable pattern(s) — top: {} ({}×). Run `sisyphus report`.",
+            fresh.len(),
+            top.templates.join(" → ").chars().take(80).collect::<String>(),
+            top.count
+        ),
+        (Some(_), n) => format!(
+            "{} new pattern(s) + {n} automation(s) need attention. Run `sisyphus report` and `sisyphus evolve`.",
+            fresh.len()
+        ),
+        (None, n) => format!("{n} accepted automation(s) aren't sticking. Run `sisyphus evolve`."),
+    };
     println!("{msg}");
     #[cfg(target_os = "macos")]
     {
@@ -329,10 +340,170 @@ fn decide(conn: &rusqlite::Connection, id: i64, decision: &str, path: Option<Str
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
+    // snapshot where history stands, so evolve can see what happened *after*
+    let max_cmd: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM commands", [], |r| r.get(0))?;
+    let count: i64 = conn
+        .query_row("SELECT count FROM patterns WHERE id = ?1", [id], |r| r.get(0))
+        .unwrap_or(0);
     conn.execute(
-        "INSERT OR REPLACE INTO decisions (pattern_id, decision, artifact_path, ts) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![id, decision, path, now],
+        "INSERT OR REPLACE INTO decisions
+         (pattern_id, decision, artifact_path, ts, at_command_id, count_at_decision)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![id, decision, path, now, max_cmd, count],
     )?;
+    Ok(())
+}
+
+struct EvolveFinding {
+    pattern_id: i64,
+    kind: FindingKind,
+    templates: Vec<String>,
+    artifact_path: Option<String>,
+    uses: i64,
+    manual_since: usize,
+}
+
+enum FindingKind {
+    NotAdopted,   // accepted, but manual sequence continues and artifact is unused
+    Resurfaced,   // ignored, but the pattern kept growing
+}
+
+fn evolve_findings(conn: &rusqlite::Connection) -> Result<Vec<EvolveFinding>> {
+    let mut stmt = conn.prepare(
+        "SELECT d.pattern_id, d.decision, d.artifact_path, COALESCE(d.at_command_id, 0),
+                COALESCE(d.count_at_decision, 0), p.template_seq
+         FROM decisions d JOIN patterns p ON p.id = d.pattern_id",
+    )?;
+    let rows: Vec<(i64, String, Option<String>, i64, i64, String)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+
+    let mut findings = Vec::new();
+    for (pattern_id, decision, artifact_path, at_id, _count_at, seq) in rows {
+        let templates: Vec<String> = serde_json::from_str(&seq)?;
+        let manual_since = mine::occurrences_since(conn, &templates, at_id)?;
+        match decision.as_str() {
+            "accepted" => {
+                let Some(path) = &artifact_path else { continue };
+                let name = std::path::Path::new(path)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let uses: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM commands WHERE head = ?1 AND id > ?2",
+                    rusqlite::params![name, at_id],
+                    |r| r.get(0),
+                )?;
+                if manual_since >= 2 && uses == 0 {
+                    findings.push(EvolveFinding {
+                        pattern_id,
+                        kind: FindingKind::NotAdopted,
+                        templates,
+                        artifact_path: artifact_path.clone(),
+                        uses,
+                        manual_since,
+                    });
+                }
+            }
+            "ignored" => {
+                if manual_since >= 4 {
+                    findings.push(EvolveFinding {
+                        pattern_id,
+                        kind: FindingKind::Resurfaced,
+                        templates,
+                        artifact_path: None,
+                        uses: 0,
+                        manual_since,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(findings)
+}
+
+fn evolve(conn: &rusqlite::Connection) -> Result<()> {
+    let findings = evolve_findings(conn)?;
+    if findings.is_empty() {
+        println!("nothing to act on — automations are being used and ignored patterns stayed quiet");
+        return Ok(());
+    }
+    let interactive = std::io::stdin().is_terminal();
+    for f in &findings {
+        match f.kind {
+            FindingKind::NotAdopted => {
+                let path = f.artifact_path.as_deref().unwrap_or("?");
+                println!(
+                    "\n✗ not adopted: {path}\n  used {}×, but you did the manual sequence {} more time(s):",
+                    f.uses, f.manual_since
+                );
+                for t in &f.templates {
+                    println!("    {t}");
+                }
+                if !interactive {
+                    continue;
+                }
+                match ask("  [r]evise with claude / [x] retire artifact & reopen pattern / [s]kip? ")? {
+                    'r' => {
+                        println!("  diagnosing via claude -p …");
+                        match draft::revise_artifact(conn, path, &f.templates, f.uses, f.manual_since) {
+                            Ok(rev) if rev.action == "revise" => {
+                                println!("  diagnosis: {}", rev.reason);
+                                println!("{}", "─".repeat(60));
+                                println!("{}", rev.content);
+                                println!("{}", "─".repeat(60));
+                                if ask("  [a]pply revision / [s]kip? ")? == 'a' {
+                                    std::fs::write(path, &rev.content)?;
+                                    decide(conn, f.pattern_id, "accepted", f.artifact_path.clone())?;
+                                    println!("  ✓ revised in place: {path}");
+                                }
+                            }
+                            Ok(rev) => {
+                                println!("  claude recommends retiring it: {}", rev.reason);
+                                if ask("  [x] retire / [s]kip? ")? == 'x' {
+                                    retire(conn, f)?;
+                                }
+                            }
+                            Err(e) => println!("  revision failed: {e:#}"),
+                        }
+                    }
+                    'x' => retire(conn, f)?,
+                    _ => {}
+                }
+            }
+            FindingKind::Resurfaced => {
+                println!(
+                    "\n↩ you ignored this, but it happened {} more time(s) since:",
+                    f.manual_since
+                );
+                for t in &f.templates {
+                    println!("    {t}");
+                }
+                if interactive
+                    && ask("  [r]eopen (shows in next report) / [k]eep ignored? ")? == 'r'
+                {
+                    conn.execute("DELETE FROM decisions WHERE pattern_id = ?1", [f.pattern_id])?;
+                    println!("  ✓ reopened");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn retire(conn: &rusqlite::Connection, f: &EvolveFinding) -> Result<()> {
+    if let Some(path) = &f.artifact_path {
+        if std::path::Path::new(path).exists() {
+            std::fs::remove_file(path)?;
+            println!("  ✓ removed {path}");
+        }
+    }
+    conn.execute("DELETE FROM decisions WHERE pattern_id = ?1", [f.pattern_id])?;
+    println!("  ✓ pattern reopened for a fresh draft");
     Ok(())
 }
 

@@ -14,6 +14,7 @@ sisyphus stats       # what's been ingested, top command templates
 sisyphus report      # mine patterns, then interactively draft/accept/ignore
 sisyphus draft <id>  # draft one pattern non-interactively (no install)
 sisyphus gain        # are accepted automations actually being used?
+sisyphus evolve      # act on adoption feedback: revise, retire, resurface
 sisyphus watch --install  # hourly background scan; notifies on new patterns
 ```
 
@@ -54,7 +55,17 @@ Three kinds of boulder, each drafted differently:
 
 Commands are normalized into templates (`git checkout a1b2c3d` → `git checkout <hash>`), then frequent contiguous sequences are mined per session stream. Three filters keep the output honest: quasi-periodic grams collapse to their repeating unit, rotations of the same cycle are deduplicated, and patterns shadowed by a longer pattern with the same support are dropped. Failures are tracked from transcript tool results (`is_error` in Claude, output heuristics in Codex) to power fix-loop detection. No LLM is involved until you ask for a draft.
 
-Accepted artifacts install to `~/.local/bin/` (scripts), `~/.config/sisyphus/aliases.zsh` (aliases), or `~/.claude/skills/` (skills). Ignored patterns never resurface.
+Accepted artifacts install to `~/.local/bin/` (scripts), `~/.config/sisyphus/aliases.zsh` (aliases), or `~/.claude/skills/` (skills).
+
+## The loop closes
+
+Every decision snapshots where your history stood, so sisyphus can see what happened *after* — and act on it, not just report it:
+
+- **Accepted but not adopted** — you installed `git-publish` yet did the manual dance 4 more times, never invoking it. `sisyphus evolve` feeds the artifact plus the post-install evidence back to Claude to diagnose the mismatch (wrong args? unmemorable name? missing step?) and revises it in place — or retires it and reopens the pattern.
+- **Ignored but still growing** — a pattern you dismissed that kept happening gets resurfaced with evidence.
+- The hourly `watch` scan notifies about both new patterns and automations that aren't sticking.
+
+observe → propose → install → measure → **revise** → repeat.
 
 ## Build
 

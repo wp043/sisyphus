@@ -93,6 +93,64 @@ fn parse_draft(text: &str) -> Result<Draft> {
     Ok(draft)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Revision {
+    pub action: String, // "revise" | "retire"
+    pub reason: String,
+    #[serde(default)]
+    pub content: String,
+}
+
+/// The user accepted this artifact but is still doing the work manually.
+/// Ask Claude to diagnose why the artifact didn't stick and either revise it
+/// or recommend retiring it.
+pub fn revise_artifact(
+    conn: &Connection,
+    artifact_path: &str,
+    templates: &[String],
+    uses: i64,
+    manual_since: usize,
+) -> Result<Revision> {
+    let current = std::fs::read_to_string(artifact_path)
+        .with_context(|| format!("cannot read {artifact_path}"))?;
+    let prompt = format!(
+        r#"A developer accepted this automation, but adoption data says it isn't working:
+- artifact invoked {uses} time(s) since install
+- meanwhile the manual sequence it replaces was still performed {manual_since} more time(s)
+
+The manual sequence:
+{}
+
+Recent concrete examples of the manual steps:
+{}
+
+Current artifact ({artifact_path}):
+---
+{current}
+---
+
+Diagnose the most likely mismatch (wrong arguments? too rigid? name hard to remember? missing a step they actually do?) and respond with STRICT JSON only:
+{{"action": "revise|retire", "reason": "one sentence", "content": "full revised artifact text (empty if retire)"}}"#,
+        templates.join("\n"),
+        examples(conn, templates)?,
+    );
+    let out = Command::new("claude")
+        .args(["-p", &prompt])
+        .output()
+        .context("failed to run `claude`")?;
+    if !out.status.success() {
+        bail!("claude -p failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let start = text.find('{').context("no JSON in claude output")?;
+    let end = text.rfind('}').context("no JSON in claude output")?;
+    let rev: Revision = serde_json::from_str(&text[start..=end]).context("unparseable revision")?;
+    if !matches!(rev.action.as_str(), "revise" | "retire") {
+        bail!("unknown revision action: {}", rev.action);
+    }
+    Ok(rev)
+}
+
 /// Write the artifact to its real destination and return the path.
 pub fn install(draft: &Draft) -> Result<PathBuf> {
     let home = dirs::home_dir().context("no home dir")?;

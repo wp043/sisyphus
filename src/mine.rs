@@ -39,51 +39,75 @@ pub struct Pattern {
     pub score: f64,
 }
 
-/// Ordered streams of (template, ts): one per agent session, plus the whole
-/// zsh history as a single stream (it has no session boundaries without
-/// EXTENDED_HISTORY timestamps).
-fn load_streams(conn: &Connection) -> Result<Vec<Vec<(String, Option<i64>)>>> {
+/// Ordered streams of (template, command row id): one per agent session, plus
+/// the whole zsh history as a single stream (it has no session boundaries
+/// without EXTENDED_HISTORY timestamps).
+fn load_streams(conn: &Connection) -> Result<Vec<Vec<(String, i64)>>> {
     let mut stmt = conn.prepare(
-        "SELECT source, COALESCE(session_key, ''), template, ts FROM commands
+        "SELECT source, COALESCE(session_key, ''), template, id FROM commands
          WHERE template IS NOT NULL AND source IN ('zsh','claude','codex')
          ORDER BY source, session_key, seq",
     )?;
-    let mut streams: Vec<Vec<(String, Option<i64>)>> = Vec::new();
+    let mut streams: Vec<Vec<(String, i64)>> = Vec::new();
     let mut current_key = None::<(String, String)>;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
-            r.get::<_, Option<i64>>(3)?,
+            r.get::<_, i64>(3)?,
         ))
     })?;
     for row in rows {
-        let (source, session, tpl, ts) = row?;
+        let (source, session, tpl, id) = row?;
         let key = (source, session);
         if current_key.as_ref() != Some(&key) {
             current_key = Some(key);
             streams.push(Vec::new());
         }
-        streams.last_mut().unwrap().push((tpl, ts));
+        streams.last_mut().unwrap().push((tpl, id));
     }
     Ok(streams)
 }
 
 /// Collapse immediate repeats (`pnpm run dev` × 14 in a row is one attempt
-/// loop, not 14 workflow steps) but remember the repeat count.
-fn dedup_runs(stream: &[(String, Option<i64>)]) -> Vec<(String, Option<i64>)> {
-    let mut out: Vec<(String, Option<i64>)> = Vec::new();
-    for (tpl, ts) in stream {
+/// loop, not 14 workflow steps).
+fn dedup_runs(stream: &[(String, i64)]) -> Vec<(String, i64)> {
+    let mut out: Vec<(String, i64)> = Vec::new();
+    for (tpl, id) in stream {
         if out.last().map(|(t, _)| t) != Some(tpl) {
-            out.push((tpl.clone(), *ts));
+            out.push((tpl.clone(), *id));
         }
     }
     out
 }
 
+/// How many times this exact sequence occurred with its first command newer
+/// than `min_id` — i.e. the manual repetitions since a decision was made.
+pub fn occurrences_since(conn: &Connection, templates: &[String], min_id: i64) -> Result<usize> {
+    if templates.is_empty() {
+        return Ok(0);
+    }
+    let mut count = 0;
+    for stream in load_streams(conn)?.iter().map(|s| dedup_runs(s)) {
+        let mut i = 0;
+        while i + templates.len() <= stream.len() {
+            let window = &stream[i..i + templates.len()];
+            if window.iter().zip(templates).all(|((t, _), want)| t == want) {
+                if window[0].1 > min_id {
+                    count += 1;
+                }
+                i += templates.len();
+            } else {
+                i += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
 pub fn mine(conn: &Connection) -> Result<Vec<Pattern>> {
-    let streams: Vec<Vec<(String, Option<i64>)>> =
+    let streams: Vec<Vec<(String, i64)>> =
         load_streams(conn)?.iter().map(|s| dedup_runs(s)).collect();
 
     // gram -> list of (stream index, position)
@@ -361,6 +385,35 @@ mod tests {
         let conn = conn_with(&rows);
         let patterns = mine(&conn).unwrap();
         assert!(patterns.is_empty(), "{:?}", patterns.iter().map(|p| &p.templates).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn counts_occurrences_after_a_boundary() {
+        let mut rows = Vec::new();
+        let mut seq = 0;
+        for _ in 0..4 {
+            for t in ["git add .", "git push"] {
+                rows.push(("zsh", t, seq));
+                seq += 1;
+            }
+        }
+        let conn = conn_with(&rows);
+        let boundary: i64 = conn
+            .query_row("SELECT MAX(id) FROM commands", [], |r| r.get(0))
+            .unwrap();
+        let tpls = vec!["git add .".to_string(), "git push".to_string()];
+        assert_eq!(occurrences_since(&conn, &tpls, 0).unwrap(), 4);
+        assert_eq!(occurrences_since(&conn, &tpls, boundary).unwrap(), 0);
+        // two more manual repetitions after the boundary
+        for t in ["git add .", "git push", "git add .", "git push"] {
+            conn.execute(
+                "INSERT INTO commands (source, raw, template, session_key, seq) VALUES ('zsh', ?1, ?1, '', ?2)",
+                params![t, seq],
+            )
+            .unwrap();
+            seq += 1;
+        }
+        assert_eq!(occurrences_since(&conn, &tpls, boundary).unwrap(), 2);
     }
 
     #[test]
