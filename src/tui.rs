@@ -1,4 +1,5 @@
-use crate::{db, draft, mine};
+use crate::theme::Theme;
+use crate::{db, draft, mine, theme};
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::crossterm::execute;
@@ -49,10 +50,11 @@ pub fn run(conn: &Connection, limit: usize) -> Result<()> {
         items.push(Item { cand: c, prompt, state: State::Idle });
     }
 
+    let theme = theme::load();
     enable_raw_mode()?;
     execute!(std::io::stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
-    let result = event_loop(conn, &mut terminal, &mut items);
+    let result = event_loop(conn, &mut terminal, &mut items, &theme);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -71,6 +73,7 @@ fn event_loop(
     conn: &Connection,
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     items: &mut [Item],
+    theme: &Theme,
 ) -> Result<()> {
     let (tx, rx) = mpsc::channel::<(usize, Result<draft::Draft>)>();
     let mut queue: VecDeque<usize> = VecDeque::new();
@@ -106,7 +109,7 @@ fn event_loop(
             });
         }
 
-        terminal.draw(|f| draw(f, items, selected, active, auto_accept))?;
+        terminal.draw(|f| draw(f, items, selected, active, auto_accept, theme))?;
 
         if !event::poll(std::time::Duration::from_millis(100))? {
             continue;
@@ -162,18 +165,18 @@ fn event_loop(
     Ok(())
 }
 
-fn state_span(state: &State) -> Span<'static> {
+fn state_span(state: &State, t: &Theme) -> Span<'static> {
     match state {
-        State::Idle => Span::styled("○", Style::default().fg(Color::DarkGray)),
-        State::Queued => Span::styled("…", Style::default().fg(Color::Yellow)),
-        State::Drafting => Span::styled("◐", Style::default().fg(Color::Yellow)),
-        State::Drafted(_) => Span::styled("●", Style::default().fg(Color::Cyan)),
-        State::Failed(_) => Span::styled("✗", Style::default().fg(Color::Red)),
-        State::Done(_) => Span::styled("✓", Style::default().fg(Color::Green)),
+        State::Idle => Span::styled("○", Style::default().fg(t.dim)),
+        State::Queued => Span::styled("…", Style::default().fg(t.warn)),
+        State::Drafting => Span::styled("◐", Style::default().fg(t.warn)),
+        State::Drafted(_) => Span::styled("●", Style::default().fg(t.accent)),
+        State::Failed(_) => Span::styled("✗", Style::default().fg(t.err)),
+        State::Done(_) => Span::styled("✓", Style::default().fg(t.ok)),
     }
 }
 
-fn draw(f: &mut Frame, items: &[Item], selected: usize, active: usize, auto_accept: bool) {
+fn draw(f: &mut Frame, items: &[Item], selected: usize, active: usize, auto_accept: bool, t: &Theme) {
     let [main, footer] =
         Layout::vertical([Constraint::Min(5), Constraint::Length(1)]).areas(f.area());
     let [left, right] =
@@ -184,12 +187,12 @@ fn draw(f: &mut Frame, items: &[Item], selected: usize, active: usize, auto_acce
         .map(|it| {
             let head = it.cand.templates[0].chars().take(30).collect::<String>();
             let line = Line::from(vec![
-                state_span(&it.state),
-                Span::raw(format!(" {} ", kind_icon(&it.cand.kind))),
-                Span::raw(head),
+                state_span(&it.state, t),
+                Span::styled(format!(" {} ", kind_icon(&it.cand.kind)), Style::default().fg(t.kind(&it.cand.kind))),
+                Span::styled(head, Style::default().fg(t.text)),
                 Span::styled(
                     format!("  {}×", it.cand.count),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.dim),
                 ),
             ]);
             ListItem::new(line)
@@ -202,9 +205,10 @@ fn draw(f: &mut Frame, items: &[Item], selected: usize, active: usize, auto_acce
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" sisyphus — boulders "),
+                    .border_style(Style::default().fg(t.dim))
+                    .title(Span::styled(" sisyphus — boulders ", Style::default().fg(t.accent).bold())),
             )
-            .highlight_style(Style::default().bg(Color::Rgb(50, 50, 70)).bold()),
+            .highlight_style(Style::default().bg(t.highlight_bg).bold()),
         left,
         &mut list_state,
     );
@@ -214,51 +218,51 @@ fn draw(f: &mut Frame, items: &[Item], selected: usize, active: usize, auto_acce
         Line::from(vec![
             Span::styled(
                 format!("{} {} ", kind_icon(&it.cand.kind), it.cand.kind),
-                Style::default().fg(Color::Cyan).bold(),
+                Style::default().fg(t.kind(&it.cand.kind)).bold(),
             ),
-            Span::raw(format!("seen {}× · score {:.0}", it.cand.count, it.cand.score)),
+            Span::styled(format!("seen {}× · score {:.0}", it.cand.count, it.cand.score), Style::default().fg(t.dim)),
         ]),
         Line::raw(""),
     ];
     for (i, tpl) in it.cand.templates.iter().enumerate() {
         let arrow = if i == 0 { "  " } else { "→ " };
         lines.push(Line::from(vec![
-            Span::styled(arrow, Style::default().fg(Color::DarkGray)),
-            Span::raw(tpl.clone()),
+            Span::styled(arrow, Style::default().fg(t.dim)),
+            Span::styled(tpl.clone(), Style::default().fg(t.text)),
         ]));
     }
     lines.push(Line::raw(""));
     match &it.state {
         State::Idle => lines.push(Line::styled(
             "press d to draft with claude",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.dim),
         )),
         State::Queued | State::Drafting => lines.push(Line::styled(
             "drafting via claude -p …",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(t.warn),
         )),
         State::Failed(e) => lines.push(Line::styled(
             e.clone(),
-            Style::default().fg(Color::Red),
+            Style::default().fg(t.err),
         )),
         State::Done(msg) => lines.push(Line::styled(
             msg.clone(),
-            Style::default().fg(Color::Green),
+            Style::default().fg(t.ok),
         )),
         State::Drafted(d) => {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{} ({})", d.name, d.kind),
-                    Style::default().fg(Color::Green).bold(),
+                    Style::default().fg(t.ok).bold(),
                 ),
-                Span::raw(format!(" — {}", d.summary)),
+                Span::styled(format!(" — {}", d.summary), Style::default().fg(t.text)),
             ]));
             lines.push(Line::styled(
                 "─".repeat(right.width.saturating_sub(4) as usize),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.dim),
             ));
             for l in d.content.lines() {
-                lines.push(Line::raw(l.to_string()));
+                lines.push(Line::styled(l.to_string(), Style::default().fg(t.text)));
             }
         }
     }
@@ -268,6 +272,7 @@ fn draw(f: &mut Frame, items: &[Item], selected: usize, active: usize, auto_acce
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.dim))
                     .padding(Padding::horizontal(1)),
             ),
         right,
@@ -279,7 +284,7 @@ fn draw(f: &mut Frame, items: &[Item], selected: usize, active: usize, auto_acce
         if auto_accept { "· AUTO " } else { "" }
     );
     f.render_widget(
-        Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(status).style(Style::default().fg(t.dim)),
         footer,
     );
 }

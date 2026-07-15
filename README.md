@@ -17,8 +17,26 @@ sisyphus report --plain  # old-school line-by-line output
 sisyphus draft <id>  # draft one pattern non-interactively (no install)
 sisyphus gain        # are accepted automations actually being used?
 sisyphus evolve      # act on adoption feedback: revise, retire, resurface
+sisyphus serve       # local web dashboard (charts, gain, pattern history)
+sisyphus doctor      # check the setup: claude, EXTENDED_HISTORY, PATH, watch
 sisyphus watch --install  # hourly background scan; notifies on new patterns
 ```
+
+## Theming
+
+The TUI ships with a muted, low-saturation palette (slate / sage / sand / lavender). Override it in `~/.config/sisyphus/config.toml`:
+
+```toml
+theme = "muted"        # or "terminal" to inherit your terminal's ANSI scheme
+
+[colors]               # any subset, hex — overrides the base theme
+accent = "#7a8cb2"
+ok = "#8ca88a"
+warn = "#c8ac7a"
+err = "#ba7a7a"
+```
+
+The dashboard (`sisyphus serve`, http://127.0.0.1:5757) uses the same palette: stat tiles, daily activity, top templates, per-artifact gain, and the full pattern ledger. Everything is served from one self-contained page; no external requests.
 
 `report` opens a two-pane TUI: pattern list on the left (⚡/🔁/💬 with live state dots), details and draft preview on the right. `j/k` move, `d` drafts the selected pattern on a background claude worker (3 run in parallel), `a` installs, `i` ignores forever, `A` drafts **and installs everything** — the trust-the-machine button. `--auto` does the same without the UI.
 

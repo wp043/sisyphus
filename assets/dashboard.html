@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sisyphus</title>
+<style>
+:root{
+  --bg:#15161b; --surface:#1c1e25; --border:#2a2d38;
+  --text:#c8cad2; --text2:#8b8e9c; --muted:#5d6070;
+  --accent:#7a8cb2; --ok:#8ca88a; --warn:#c8ac7a; --err:#ba7a7a; --lav:#9e8cb2;
+}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--text);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;padding:32px 24px;max-width:1080px;margin:0 auto}
+h1{font-size:18px;font-weight:600;letter-spacing:.5px}
+h1 .rock{filter:saturate(.6)}
+.sub{color:var(--text2);margin:4px 0 28px;font-size:13px}
+h2{font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:1.2px;margin:32px 0 12px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.tile{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
+.tile .v{font-size:24px;font-weight:600;color:var(--text)}
+.tile .l{font-size:12px;color:var(--text2);margin-top:2px}
+.tile.hero .v{color:var(--accent)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto}
+svg text{font:11px ui-monospace,Menlo,monospace;fill:var(--text2)}
+.bar{fill:var(--accent)}
+.bar:hover{fill:#93a5c9}
+.grid-line{stroke:var(--border);stroke-width:1}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:var(--text2);font-weight:500;padding:6px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:6px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.chain{color:var(--text);word-break:break-all}
+.badge{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;white-space:nowrap}
+.badge.sequence{background:rgba(122,140,178,.18);color:var(--accent)}
+.badge.fixloop{background:rgba(200,172,122,.16);color:var(--warn)}
+.badge.prompt{background:rgba(158,140,178,.16);color:var(--lav)}
+.dec{font-size:12px;white-space:nowrap}
+.dec.accepted{color:var(--ok)} .dec.ignored{color:var(--muted)} .dec.undecided{color:var(--warn)}
+#tooltip{position:fixed;pointer-events:none;background:#0f1014;border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:12px;color:var(--text);display:none;z-index:9}
+.empty{color:var(--muted);padding:12px 0}
+.hbar-row{display:grid;grid-template-columns:minmax(120px,38%) 1fr 46px;gap:10px;align-items:center;padding:3px 0}
+.hbar-label{color:var(--text2);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+.hbar-track{height:14px;position:relative}
+.hbar-fill{height:100%;background:var(--accent);border-radius:0 4px 4px 0;min-width:2px}
+.hbar-row:hover .hbar-fill{background:#93a5c9}
+.hbar-n{color:var(--text2);font-size:12px;font-variant-numeric:tabular-nums}
+footer{color:var(--muted);font-size:12px;margin-top:36px}
+</style>
+</head>
+<body>
+<h1><span class="rock">🪨</span> sisyphus</h1>
+<div class="sub">the boulders you keep pushing — local dashboard</div>
+
+<section class="tiles" id="tiles"></section>
+
+<h2>activity — commands per day (agent history)</h2>
+<div class="card"><div id="daily" class="empty">loading…</div></div>
+
+<h2>most-repeated command templates</h2>
+<div class="card"><div id="templates" class="empty">loading…</div></div>
+
+<h2>gain — accepted automations</h2>
+<div class="card"><div id="gain" class="empty">loading…</div></div>
+
+<h2>patterns</h2>
+<div class="card"><div id="patterns" class="empty">loading…</div></div>
+
+<footer>data stays on this machine · refresh to re-read the local db</footer>
+<div id="tooltip"></div>
+
+<script>
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const tip = document.getElementById('tooltip');
+function showTip(e, html){ tip.innerHTML = html; tip.style.display='block'; tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY-10)+'px'; }
+function hideTip(){ tip.style.display='none'; }
+
+function tiles(t){
+  const items = [
+    [t.commands.toLocaleString(), 'commands mined'],
+    [t.prompts.toLocaleString(), 'AI prompts mined'],
+    [t.patterns, 'patterns found'],
+    [t.accepted, 'automations accepted'],
+    [t.steps_saved, 'manual steps avoided', 'hero'],
+  ];
+  document.getElementById('tiles').innerHTML = items.map(([v,l,h]) =>
+    `<div class="tile ${h||''}"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
+}
+
+function dailyChart(days){
+  const el = document.getElementById('daily');
+  if(!days.length){ el.textContent = 'no timestamped history yet — agent sources carry timestamps; enable zsh EXTENDED_HISTORY for shell'; return; }
+  const W = Math.max(el.clientWidth||900, 320), H = 150, pad = {l:34, r:8, t:8, b:22};
+  const max = Math.max(...days.map(d=>d.n));
+  const bw = Math.max(2, Math.min(26, (W-pad.l-pad.r)/days.length - 2));
+  const x = i => pad.l + i * ((W-pad.l-pad.r)/days.length);
+  const y = n => pad.t + (H-pad.t-pad.b) * (1 - n/max);
+  let s = `<svg width="${W}" height="${H}" role="img" aria-label="commands per day">`;
+  for(const g of [0, .5, 1]){
+    const gy = pad.t + (H-pad.t-pad.b)*g;
+    s += `<line class="grid-line" x1="${pad.l}" y1="${gy}" x2="${W-pad.r}" y2="${gy}"/>`;
+    s += `<text x="${pad.l-6}" y="${gy+4}" text-anchor="end">${Math.round(max*(1-g))}</text>`;
+  }
+  days.forEach((d,i)=>{
+    const h = H-pad.b - y(d.n);
+    s += `<rect class="bar" data-i="${i}" x="${x(i)}" y="${y(d.n)}" width="${bw}" height="${Math.max(h,1)}" rx="2"/>`;
+  });
+  const step = Math.ceil(days.length/8);
+  days.forEach((d,i)=>{ if(i%step===0) s += `<text x="${x(i)}" y="${H-6}">${d.d.slice(5)}</text>`; });
+  s += '</svg>';
+  el.classList.remove('empty'); el.innerHTML = s;
+  el.querySelectorAll('.bar').forEach(r=>{
+    const d = days[+r.dataset.i];
+    r.addEventListener('mousemove', e=>showTip(e, `<b>${d.d}</b><br>${d.n} commands`));
+    r.addEventListener('mouseleave', hideTip);
+  });
+}
+
+function hbars(elId, rows, labelKey){
+  const el = document.getElementById(elId);
+  if(!rows.length){ el.textContent = 'nothing yet'; return; }
+  const max = Math.max(...rows.map(r=>r.n));
+  el.classList.remove('empty');
+  el.innerHTML = rows.map(r=>`
+    <div class="hbar-row" title="${esc(r[labelKey])}">
+      <div class="hbar-label">${esc(r[labelKey])}</div>
+      <div class="hbar-track"><div class="hbar-fill" style="width:${(100*r.n/max).toFixed(1)}%"></div></div>
+      <div class="hbar-n">${r.n}×</div>
+    </div>`).join('');
+}
+
+function gainTable(rows){
+  const el = document.getElementById('gain');
+  if(!rows.length){ el.textContent = 'no accepted automations yet — run `sisyphus report`'; return; }
+  el.classList.remove('empty');
+  el.innerHTML = `<table><tr><th>artifact</th><th class="num">uses</th><th class="num">steps replaced</th><th class="num">steps avoided</th></tr>` +
+    rows.map(g=>`<tr><td>${esc(g.name)}</td><td class="num">${g.uses}</td><td class="num">${g.steps}</td><td class="num">${g.saved}</td></tr>`).join('') + '</table>';
+}
+
+function patternTable(rows){
+  const el = document.getElementById('patterns');
+  if(!rows.length){ el.textContent = 'no patterns yet — run `sisyphus ingest`'; return; }
+  el.classList.remove('empty');
+  el.innerHTML = `<table><tr><th>kind</th><th>pattern</th><th class="num">seen</th><th class="num">score</th><th>status</th></tr>` +
+    rows.map(p=>`<tr>
+      <td><span class="badge ${esc(p.kind)}">${esc(p.kind)}</span></td>
+      <td class="chain">${esc(p.chain)}</td>
+      <td class="num">${p.count}</td><td class="num">${Math.round(p.score)}</td>
+      <td class="dec ${esc(p.decision)}">${esc(p.decision)}${p.artifact ? ' · '+esc(p.artifact.split('/').pop()) : ''}</td>
+    </tr>`).join('') + '</table>';
+}
+
+fetch('/api/data').then(r=>r.json()).then(d=>{
+  tiles(d.totals);
+  dailyChart(d.daily);
+  hbars('templates', d.top_templates.map(t=>({label:t.tpl, n:t.n})), 'label');
+  gainTable(d.gain);
+  patternTable(d.patterns);
+}).catch(e=>{ document.body.insertAdjacentHTML('beforeend', `<div class="empty">failed to load: ${esc(e)}</div>`); });
+</script>
+</body>
+</html>

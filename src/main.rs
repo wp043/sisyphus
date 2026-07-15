@@ -5,9 +5,12 @@ mod collect {
     pub mod zsh;
 }
 mod db;
+mod doctor;
 mod draft;
 mod mine;
 mod normalize;
+mod serve;
+mod theme;
 mod tui;
 
 use std::io::{IsTerminal, Write};
@@ -52,6 +55,16 @@ enum Cmd {
     Evolve,
     /// Ingest + mine silently; macOS-notify if a new high-value pattern appeared
     Scan,
+    /// Serve the local web dashboard
+    Serve {
+        #[arg(short, long, default_value_t = 5757)]
+        port: u16,
+        /// Don't open the browser automatically
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// Check that everything sisyphus relies on is set up
+    Doctor,
     /// Manage the hourly background scan (launchd)
     Watch {
         #[arg(long)]
@@ -109,6 +122,8 @@ fn main() -> Result<()> {
         }
         Cmd::Gain => gain(&conn)?,
         Cmd::Evolve => evolve(&conn)?,
+        Cmd::Serve { port, no_open } => serve::run(port, !no_open)?,
+        Cmd::Doctor => doctor::run(&conn)?,
         Cmd::Scan => scan(&conn)?,
         Cmd::Watch { install, uninstall } => watch(install, uninstall)?,
     }
