@@ -1,0 +1,20 @@
+[package]
+name = "sisyphus"
+version = "0.1.0"
+edition = "2024"
+description = "Mines your shell and AI-agent history for repeated workflows and drafts automations"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+libc = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+
+[profile.release]
+lto = true
+strip = true
