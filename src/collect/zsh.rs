@@ -55,19 +55,16 @@ pub fn parse(bytes: &[u8]) -> Vec<ZshEntry> {
 }
 
 fn parse_entry(line: &str) -> ZshEntry {
-    if let Some(rest) = line.strip_prefix(": ") {
-        if let Some((meta, cmd)) = rest.split_once(';') {
-            if let Some((ts, dur)) = meta.split_once(':') {
-                if let (Ok(ts), Ok(dur)) = (ts.trim().parse::<i64>(), dur.trim().parse::<i64>()) {
+    if let Some(rest) = line.strip_prefix(": ")
+        && let Some((meta, cmd)) = rest.split_once(';')
+            && let Some((ts, dur)) = meta.split_once(':')
+                && let (Ok(ts), Ok(dur)) = (ts.trim().parse::<i64>(), dur.trim().parse::<i64>()) {
                     return ZshEntry {
                         cmd: cmd.to_string(),
                         ts: Some(ts),
                         duration_ms: Some(dur * 1000),
                     };
                 }
-            }
-        }
-    }
     ZshEntry { cmd: line.to_string(), ts: None, duration_ms: None }
 }
 

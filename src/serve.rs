@@ -56,10 +56,10 @@ fn data() -> Result<String> {
         let mut stmt = conn.prepare(
             "SELECT source, COUNT(*) FROM commands GROUP BY source ORDER BY 2 DESC",
         )?;
-        let rows = stmt
+        
+        stmt
             .query_map([], |r| Ok(json!({"name": r.get::<_, String>(0)?, "n": r.get::<_, i64>(1)?})))?
-            .collect::<std::result::Result<_, _>>()?;
-        rows
+            .collect::<std::result::Result<_, _>>()?
     };
 
     let daily: Vec<_> = {

@@ -93,28 +93,26 @@ fn ingest_file(conn: &Connection, path: &Path, project: &str) -> Result<(usize, 
             Some("assistant") => {
                 let Some(content) = v["message"]["content"].as_array() else { continue };
                 for block in content {
-                    if block["type"] == "tool_use" && block["name"] == "Bash" {
-                        if let Some(cmd) = block["input"]["command"].as_str() {
+                    if block["type"] == "tool_use" && block["name"] == "Bash"
+                        && let Some(cmd) = block["input"]["command"].as_str() {
                             let head = cmd.split_whitespace().next().unwrap_or("");
                             let n = cmd_stmt.execute(params![
                                 "claude", cmd, head, ts, cwd, project, session_key, line_no
                             ])?;
                             cmds += n;
-                            if n > 0 {
-                                if let Some(id) = block["id"].as_str() {
+                            if n > 0
+                                && let Some(id) = block["id"].as_str() {
                                     call_rows.insert(id.to_string(), conn.last_insert_rowid());
                                 }
-                            }
                         }
-                    }
                 }
             }
             Some("user") => {
                 // tool results ride in user messages; mark failed commands
                 if let Some(blocks) = v["message"]["content"].as_array() {
                     for block in blocks {
-                        if block["type"] == "tool_result" && block["is_error"] == true {
-                            if let Some(row) = block["tool_use_id"]
+                        if block["type"] == "tool_result" && block["is_error"] == true
+                            && let Some(row) = block["tool_use_id"]
                                 .as_str()
                                 .and_then(|id| call_rows.get(id))
                             {
@@ -123,7 +121,6 @@ fn ingest_file(conn: &Connection, path: &Path, project: &str) -> Result<(usize, 
                                     params![row],
                                 )?;
                             }
-                        }
                     }
                 }
                 if v["isMeta"].as_bool() == Some(true) {

@@ -30,12 +30,11 @@ pub fn ingest(conn: &Connection) -> Result<usize> {
              VALUES ('gemini_prompt', ?1, '', ?2, ?3, ?4)",
         )?;
         for (i, m) in msgs.iter().enumerate().skip(done as usize) {
-            if m["type"] == "user" {
-                if let Some(t) = m["message"].as_str() {
+            if m["type"] == "user"
+                && let Some(t) = m["message"].as_str() {
                     let ts = m["timestamp"].as_str().and_then(crate::collect::claude::parse_iso);
                     prompts += stmt.execute(params![t.trim(), ts, session, i as i64])?;
                 }
-            }
         }
         conn.execute(
             "INSERT INTO source_cursors (source, cursor, file_size) VALUES (?1, ?2, ?3)

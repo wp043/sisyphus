@@ -95,11 +95,10 @@ fn ingest_file(conn: &Connection, path: &Path) -> Result<(usize, usize)> {
                         "codex", cmd, head, ts, cwd, Option::<String>::None, session_key, line_no
                     ])?;
                     cmds += n;
-                    if n > 0 {
-                        if let Some(id) = payload["call_id"].as_str() {
+                    if n > 0
+                        && let Some(id) = payload["call_id"].as_str() {
                             call_rows.insert(id.to_string(), conn.last_insert_rowid());
                         }
-                    }
                 }
             }
             (Some("response_item"), Some("function_call_output")) => {
@@ -110,13 +109,12 @@ fn ingest_file(conn: &Connection, path: &Path) -> Result<(usize, usize)> {
                         head.contains("failed:") || head.contains("error:") || head.contains("exited with code")
                     })
                     .unwrap_or(false);
-                if failed {
-                    if let Some(row) =
+                if failed
+                    && let Some(row) =
                         payload["call_id"].as_str().and_then(|id| call_rows.get(id))
                     {
                         conn.execute("UPDATE commands SET failed = 1 WHERE id = ?1", params![row])?;
                     }
-                }
             }
             (Some("event_msg"), Some("user_message")) => {
                 if let Some(text) = payload["message"].as_str() {

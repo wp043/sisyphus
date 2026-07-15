@@ -566,12 +566,11 @@ fn evolve(conn: &rusqlite::Connection) -> Result<()> {
 }
 
 fn retire(conn: &rusqlite::Connection, f: &EvolveFinding) -> Result<()> {
-    if let Some(path) = &f.artifact_path {
-        if std::path::Path::new(path).exists() {
+    if let Some(path) = &f.artifact_path
+        && std::path::Path::new(path).exists() {
             std::fs::remove_file(path)?;
             println!("  ✓ removed {path}");
         }
-    }
     conn.execute("DELETE FROM decisions WHERE pattern_id = ?1", [f.pattern_id])?;
     println!("  ✓ pattern reopened for a fresh draft");
     Ok(())

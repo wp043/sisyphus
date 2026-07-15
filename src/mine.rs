@@ -131,11 +131,10 @@ pub fn mine(conn: &Connection) -> Result<Vec<Pattern>> {
             let mut count = 0usize;
             let mut last: Option<(usize, usize)> = None;
             for (si, pos) in occ {
-                if let Some((lsi, lpos)) = last {
-                    if lsi == si && pos < lpos + len {
+                if let Some((lsi, lpos)) = last
+                    && lsi == si && pos < lpos + len {
                         continue;
                     }
-                }
                 count += 1;
                 last = Some((si, pos));
             }
