@@ -80,3 +80,15 @@ observe → propose → install → measure → **revise** → repeat.
 ```sh
 cargo build --release   # requires claude CLI on PATH for drafting
 ```
+
+## Developing without real history
+
+Don't have weeks of history lying around? Seed a synthetic one:
+
+```sh
+sisyphus --db /tmp/demo.db seed          # 21 days of plausible dev history
+sisyphus --db /tmp/demo.db report        # full TUI against it
+sisyphus --db /tmp/demo.db serve         # dashboard with real-looking charts
+```
+
+`--db` (or `SISYPHUS_DB`) points any command at an alternate database; `seed` refuses to touch the real one. The same generator backs the end-to-end test that asserts the miner finds every planted pattern kind.

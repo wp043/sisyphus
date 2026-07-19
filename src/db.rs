@@ -3,6 +3,9 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 
 pub fn db_path() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("SISYPHUS_DB") {
+        return Ok(PathBuf::from(p));
+    }
     let dir = dirs::data_dir()
         .context("no data dir")?
         .join("sisyphus");
@@ -10,8 +13,19 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(dir.join("sisyphus.db"))
 }
 
+/// True when using the real default DB (no --db flag or SISYPHUS_DB override).
+pub fn is_default_db() -> bool {
+    std::env::var("SISYPHUS_DB").is_err()
+}
+
 pub fn open() -> Result<Connection> {
     let conn = Connection::open(db_path()?)?;
+    init_schema(&conn)?;
+    Ok(conn)
+}
+
+/// Apply schema + migrations. Public so tests can use in-memory connections.
+pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
         PRAGMA journal_mode = WAL;
@@ -66,8 +80,8 @@ pub fn open() -> Result<Connection> {
         "#,
     )?;
     // migrations for DBs created before these columns existed
-    migrate(&conn);
-    Ok(conn)
+    migrate(conn);
+    Ok(())
 }
 
 fn migrate(conn: &Connection) {

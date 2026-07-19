@@ -3,7 +3,7 @@ use rusqlite::{Connection, params};
 use std::collections::HashMap;
 
 const MIN_LEN: usize = 2;
-const MAX_LEN: usize = 6;
+const MAX_LEN: usize = 7;
 const MIN_COUNT: usize = 3;
 
 /// Templates that carry no automation signal on their own; a pattern made
@@ -146,16 +146,28 @@ pub fn mine(conn: &Connection) -> Result<Vec<Pattern>> {
     // iteration loop, not a longer workflow — the unit itself carries the signal
     counted.retain(|(gram, _)| !is_quasi_periodic(gram));
 
-    // closed-pattern filter: drop a gram if a strictly longer gram contains it
-    // contiguously with (nearly) the same support — the longer one is the real
-    // workflow, the shorter is its shadow
-    counted.sort_by_key(|(g, _)| std::cmp::Reverse(g.len()));
+    // a template showing up 3+ times inside one gram is a retry loop wearing a
+    // workflow costume — that signal belongs to fix-loop mining
+    counted.retain(|(gram, _)| {
+        let mut freq: HashMap<&String, usize> = HashMap::new();
+        for t in gram {
+            *freq.entry(t).or_default() += 1;
+        }
+        freq.values().all(|&n| n < 3)
+    });
+
+    // closed/overlap filter: drop a gram when a kept gram (longer or shifted)
+    // shares all but one of its steps with similar support — shifted windows of
+    // one true workflow shouldn't surface as separate patterns
+    counted.sort_by_key(|(g, c)| (std::cmp::Reverse(g.len()), std::cmp::Reverse(*c)));
     let mut kept: Vec<(Vec<String>, usize)> = Vec::new();
     'outer: for (gram, count) in counted {
-        for (longer, lcount) in &kept {
-            if longer.len() > gram.len()
-                && *lcount as f64 >= count as f64 * 0.75
-                && longer.windows(gram.len()).any(|w| w == gram.as_slice())
+        let w = (gram.len() - 1).max(2).min(gram.len());
+        for (other, ocount) in &kept {
+            if *ocount as f64 >= count as f64 * 0.6
+                && gram
+                    .windows(w)
+                    .any(|gw| other.windows(w.min(other.len())).any(|ow| ow == gw))
             {
                 continue 'outer;
             }

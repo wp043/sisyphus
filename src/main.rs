@@ -9,6 +9,7 @@ mod doctor;
 mod draft;
 mod mine;
 mod normalize;
+mod seed;
 mod serve;
 mod theme;
 mod tui;
@@ -21,6 +22,9 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "sisyphus", about = "Finds the boulders you keep pushing", version)]
 struct Cli {
+    /// Use this database file instead of the default (also: SISYPHUS_DB env)
+    #[arg(long, global = true)]
+    db: Option<std::path::PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -65,6 +69,12 @@ enum Cmd {
     },
     /// Check that everything sisyphus relies on is set up
     Doctor,
+    /// Fill the DB with synthetic multi-week history (for development/demo).
+    /// Refuses to touch the real default DB.
+    Seed {
+        #[arg(long, default_value_t = 21)]
+        days: i64,
+    },
     /// Manage the hourly background scan (launchd)
     Watch {
         #[arg(long)]
@@ -81,6 +91,10 @@ fn main() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     let cli = Cli::parse();
+    if let Some(db) = &cli.db {
+        // route through the env var so per-request opens (serve) see it too
+        unsafe { std::env::set_var("SISYPHUS_DB", db) };
+    }
     let conn = db::open()?;
     match cli.cmd {
         Cmd::Ingest => {
@@ -124,6 +138,15 @@ fn main() -> Result<()> {
         Cmd::Evolve => evolve(&conn)?,
         Cmd::Serve { port, no_open } => serve::run(port, !no_open)?,
         Cmd::Doctor => doctor::run(&conn)?,
+        Cmd::Seed { days } => {
+            if db::is_default_db() {
+                anyhow::bail!(
+                    "refusing to seed your real database — pass --db, e.g.\n  sisyphus --db /tmp/demo.db seed && sisyphus --db /tmp/demo.db report"
+                );
+            }
+            let n = seed::run(&conn, days)?;
+            println!("seeded {n} synthetic commands over {days} days");
+        }
         Cmd::Scan => scan(&conn)?,
         Cmd::Watch { install, uninstall } => watch(install, uninstall)?,
     }
