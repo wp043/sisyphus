@@ -209,8 +209,10 @@ pub fn fix_loops(conn: &Connection) -> Result<Vec<Pattern>> {
         "SELECT template, SUM(runs), SUM(fails), COUNT(*) FROM (
             SELECT template, COUNT(*) runs, SUM(COALESCE(failed, 0)) fails
             FROM commands
-            WHERE source IN ('claude', 'codex') AND template IS NOT NULL
-            GROUP BY source, session_key, template
+            WHERE source IN ('claude', 'codex', 'zsh') AND template IS NOT NULL
+            -- zsh has no sessions; day-bucket it (only hook rows carry ts +
+            -- exit codes, so plain history can't produce false fails)
+            GROUP BY source, COALESCE(session_key, date(ts, 'unixepoch')), template
             HAVING runs >= 3 AND fails >= 2
          ) GROUP BY template ORDER BY SUM(runs) DESC",
     )?;
@@ -232,10 +234,19 @@ pub fn fix_loops(conn: &Connection) -> Result<Vec<Pattern>> {
     Ok(out)
 }
 
+/// Words that don't distinguish one intent from another: politeness, glue,
+/// and the interchangeable "produce something" verbs. Stripping them lets
+/// "write release notes" and "generate release notes" land in one cluster.
+const STOPWORDS: &[&str] = &[
+    "the", "and", "for", "this", "that", "then", "please", "can", "you", "your",
+    "its", "with", "from", "into", "onto", "using", "about", "also", "just",
+    "write", "generate", "draft", "create", "make", "give", "help", "based",
+];
+
 fn word_set(text: &str) -> std::collections::HashSet<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= 3)
+        .filter(|w| w.len() >= 3 && !STOPWORDS.contains(w))
         .map(String::from)
         .collect()
 }
@@ -265,7 +276,7 @@ pub fn prompt_clusters(conn: &Connection) -> Result<Vec<Pattern>> {
         for j in i + 1..prompts.len() {
             let inter = sets[i].intersection(&sets[j]).count();
             let union = sets[i].len() + sets[j].len() - inter;
-            if union > 0 && inter as f64 / union as f64 >= 0.5 {
+            if union > 0 && inter as f64 / union as f64 >= 0.4 {
                 let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
                 if ri != rj {
                     parent[ri] = rj;

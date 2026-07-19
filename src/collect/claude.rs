@@ -116,9 +116,17 @@ fn ingest_file(conn: &Connection, path: &Path, project: &str) -> Result<(usize, 
                                 .as_str()
                                 .and_then(|id| call_rows.get(id))
                             {
+                                let snippet = match &block["content"] {
+                                    Value::String(s) => Some(s.as_str()),
+                                    Value::Array(bs) => bs
+                                        .iter()
+                                        .find_map(|b| (b["type"] == "text").then(|| b["text"].as_str()).flatten()),
+                                    _ => None,
+                                }
+                                .map(|s| s.chars().take(300).collect::<String>());
                                 conn.execute(
-                                    "UPDATE commands SET failed = 1 WHERE id = ?1",
-                                    params![row],
+                                    "UPDATE commands SET failed = 1, error_snippet = ?2 WHERE id = ?1",
+                                    params![row, snippet],
                                 )?;
                             }
                     }

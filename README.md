@@ -44,6 +44,7 @@ The dashboard (`sisyphus serve`, http://127.0.0.1:5757) uses the same palette: s
 
 | Source | Location | What's extracted |
 |---|---|---|
+| zsh hook | `eval "$(sisyphus hook zsh)"` in `~/.zshrc` | commands + timestamp, duration, exit code, cwd (best source; supersedes HISTFILE once active) |
 | zsh | `~/.zsh_history` | commands (+timestamps with `EXTENDED_HISTORY`) |
 | Claude Code | `~/.claude/projects/*/*.jsonl` | Bash tool calls, prompts |
 | Codex | `~/.codex/sessions/**/rollout-*.jsonl` | exec/shell calls, prompts |

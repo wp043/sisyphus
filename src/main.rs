@@ -2,6 +2,7 @@ mod collect {
     pub mod claude;
     pub mod codex;
     pub mod gemini;
+    pub mod hook;
     pub mod zsh;
 }
 mod db;
@@ -69,6 +70,12 @@ enum Cmd {
     },
     /// Check that everything sisyphus relies on is set up
     Doctor,
+    /// Print the shell hook that logs timestamps/durations/exit codes.
+    /// Install with: eval "$(sisyphus hook zsh)" in ~/.zshrc
+    Hook {
+        /// Shell to emit a hook for (only zsh currently)
+        shell: String,
+    },
     /// Fill the DB with synthetic multi-week history (for development/demo).
     /// Refuses to touch the real default DB.
     Seed {
@@ -98,11 +105,14 @@ fn main() -> Result<()> {
     let conn = db::open()?;
     match cli.cmd {
         Cmd::Ingest => {
+            // once the shell hook is logging, its records supersede HISTFILE
+            // (same commands, richer fields) — don't ingest both
+            let hook_new = collect::hook::ingest(&conn)?;
             let zsh_path = dirs::home_dir().unwrap_or_default().join(".zsh_history");
-            let zsh_new = if zsh_path.exists() {
+            let zsh_new = if !collect::hook::log_path().exists() && zsh_path.exists() {
                 collect::zsh::ingest(&conn, &zsh_path)?
             } else {
-                0
+                hook_new
             };
             let (claude_new, claude_prompts) = collect::claude::ingest(&conn)?;
             let (codex_new, codex_prompts) = collect::codex::ingest(&conn)?;
@@ -138,6 +148,10 @@ fn main() -> Result<()> {
         Cmd::Evolve => evolve(&conn)?,
         Cmd::Serve { port, no_open } => serve::run(port, !no_open)?,
         Cmd::Doctor => doctor::run(&conn)?,
+        Cmd::Hook { shell } => match shell.as_str() {
+            "zsh" => println!("{}", collect::hook::zsh_snippet()),
+            other => anyhow::bail!("unsupported shell {other:?} — only zsh for now"),
+        },
         Cmd::Seed { days } => {
             if db::is_default_db() {
                 anyhow::bail!(

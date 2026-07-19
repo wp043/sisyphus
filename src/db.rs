@@ -89,6 +89,8 @@ fn migrate(conn: &Connection) {
     // where history stood when the user decided — everything after is "since"
     let _ = conn.execute("ALTER TABLE decisions ADD COLUMN at_command_id INTEGER", []);
     let _ = conn.execute("ALTER TABLE decisions ADD COLUMN count_at_decision INTEGER", []);
+    // first ~300 chars of failure output, for fix-loop draft context
+    let _ = conn.execute("ALTER TABLE commands ADD COLUMN error_snippet TEXT", []);
 }
 
 /// Record the user's decision on a pattern, snapshotting where history stands

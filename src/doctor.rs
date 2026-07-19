@@ -32,6 +32,12 @@ pub fn run(conn: &Connection) -> Result<()> {
         "echo 'setopt EXTENDED_HISTORY' >> ~/.zshrc",
     );
 
+    check(
+        zshrc.contains("sisyphus hook zsh") || crate::collect::hook::log_path().exists(),
+        "shell hook installed (exit codes + durations for every command)",
+        "echo 'eval \"$(sisyphus hook zsh)\"' >> ~/.zshrc",
+    );
+
     let local_bin_on_path = std::env::var("PATH")
         .map(|p| p.split(':').any(|d| d == home.join(".local/bin").to_string_lossy()))
         .unwrap_or(false);

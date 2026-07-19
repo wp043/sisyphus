@@ -67,7 +67,23 @@ Respond with STRICT JSON only, no markdown fences, matching:
 /// Build the full drafting prompt. Needs the DB (for examples); the actual
 /// claude call in `run_claude` doesn't, so calls can run on worker threads.
 pub fn prepare_prompt(conn: &Connection, kind: &str, templates: &[String], count: usize) -> Result<String> {
-    let ex = if kind == "prompt" { String::new() } else { examples(conn, templates)? };
+    let mut ex = if kind == "prompt" { String::new() } else { examples(conn, templates)? };
+    if kind == "fixloop" {
+        // real failure output is the highest-signal context a fix skill can get
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT error_snippet FROM commands
+             WHERE template = ?1 AND failed = 1 AND error_snippet IS NOT NULL LIMIT 3",
+        )?;
+        let errors: Vec<String> = stmt
+            .query_map([&templates[0]], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        if !errors.is_empty() {
+            ex.push_str("\nActual error output seen when it failed:\n");
+            for e in errors {
+                ex.push_str(&format!("---\n{e}\n"));
+            }
+        }
+    }
     Ok(build_prompt(kind, templates, count, &ex))
 }
 

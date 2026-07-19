@@ -113,7 +113,13 @@ fn ingest_file(conn: &Connection, path: &Path) -> Result<(usize, usize)> {
                     && let Some(row) =
                         payload["call_id"].as_str().and_then(|id| call_rows.get(id))
                     {
-                        conn.execute("UPDATE commands SET failed = 1 WHERE id = ?1", params![row])?;
+                        let snippet = payload["output"]
+                            .as_str()
+                            .map(|s| s.chars().take(300).collect::<String>());
+                        conn.execute(
+                            "UPDATE commands SET failed = 1, error_snippet = ?2 WHERE id = ?1",
+                            params![row, snippet],
+                        )?;
                     }
             }
             (Some("event_msg"), Some("user_message")) => {
