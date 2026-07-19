@@ -251,29 +251,39 @@ fn word_set(text: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// Cluster near-duplicate prompts across all AI tools: asking the same kind of
-/// thing 3+ times is a skill waiting to exist. Jaccard similarity over word
-/// sets; O(n²) is fine at personal-history scale.
-pub fn prompt_clusters(conn: &Connection) -> Result<Vec<Pattern>> {
+struct PromptRow {
+    source: String, // 'claude_prompt' | 'codex_prompt' | 'gemini_prompt'
+    session: String,
+    seq: i64,
+    raw: String,
+}
+
+fn load_prompts(conn: &Connection) -> Result<Vec<PromptRow>> {
     let mut stmt = conn.prepare(
-        "SELECT raw FROM commands
+        "SELECT source, COALESCE(session_key, ''), seq, raw FROM commands
          WHERE source LIKE '%_prompt' AND LENGTH(raw) BETWEEN 12 AND 300",
     )?;
-    let prompts: Vec<String> = stmt
-        .query_map([], |r| r.get(0))?
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(PromptRow { source: r.get(0)?, session: r.get(1)?, seq: r.get(2)?, raw: r.get(3)? })
+        })?
         .collect::<std::result::Result<_, _>>()?;
-    let sets: Vec<_> = prompts.iter().map(|p| word_set(p)).collect();
+    Ok(rows)
+}
 
-    // union-find over similar pairs
-    let mut parent: Vec<usize> = (0..prompts.len()).collect();
+/// Union-find clustering of near-duplicate prompts (Jaccard over word sets);
+/// returns member-index groups of size >= 3. O(n²) is fine at personal scale.
+fn cluster_prompts(rows: &[PromptRow]) -> Vec<Vec<usize>> {
+    let sets: Vec<_> = rows.iter().map(|p| word_set(&p.raw)).collect();
+    let mut parent: Vec<usize> = (0..rows.len()).collect();
     fn find(parent: &mut Vec<usize>, i: usize) -> usize {
         if parent[i] != i {
             parent[i] = find(parent, parent[i]);
         }
         parent[i]
     }
-    for i in 0..prompts.len() {
-        for j in i + 1..prompts.len() {
+    for i in 0..rows.len() {
+        for j in i + 1..rows.len() {
             let inter = sets[i].intersection(&sets[j]).count();
             let union = sets[i].len() + sets[j].len() - inter;
             if union > 0 && inter as f64 / union as f64 >= 0.4 {
@@ -285,24 +295,102 @@ pub fn prompt_clusters(conn: &Connection) -> Result<Vec<Pattern>> {
         }
     }
     let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
-    for i in 0..prompts.len() {
+    for i in 0..rows.len() {
         let root = find(&mut parent, i);
         clusters.entry(root).or_default().push(i);
     }
-    let mut out: Vec<Pattern> = clusters
-        .into_values()
-        .filter(|members| members.len() >= 3)
+    clusters.into_values().filter(|m| m.len() >= 3).collect()
+}
+
+fn representative(rows: &[PromptRow], members: &[usize]) -> String {
+    members
+        .iter()
+        .map(|&i| rows[i].raw.clone())
+        .min_by_key(|p| p.len())
+        .unwrap_or_default()
+}
+
+/// Cluster near-duplicate prompts across all AI tools: asking the same kind of
+/// thing 3+ times is a skill waiting to exist.
+pub fn prompt_clusters(conn: &Connection) -> Result<Vec<Pattern>> {
+    let rows = load_prompts(conn)?;
+    let mut out: Vec<Pattern> = cluster_prompts(&rows)
+        .into_iter()
         .map(|members| {
             let count = members.len();
-            // shortest member reads as the cleanest statement of the intent
-            let rep = members
-                .into_iter()
-                .map(|i| prompts[i].clone())
-                .min_by_key(|p| p.len())
-                .unwrap_or_default();
+            let rep = representative(&rows, &members);
             Pattern { templates: vec![rep], count, score: count as f64 * 2.0 }
         })
         .collect();
+    out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    Ok(out)
+}
+
+/// The deepest AI-side signal: a recurring ask *paired with* what the agent
+/// then actually runs. For each prompt cluster, look at the commands between
+/// each member prompt and the next prompt in its session; templates common to
+/// most instances are the intent's known steps. Drafted as a skill, those
+/// steps stop being rediscovered from scratch every time.
+pub fn intents(conn: &Connection) -> Result<Vec<Pattern>> {
+    let rows = load_prompts(conn)?;
+    let mut cmd_stmt = conn.prepare(
+        "SELECT template FROM commands
+         WHERE source = ?1 AND session_key = ?2 AND seq > ?3 AND seq < ?4
+           AND template IS NOT NULL
+         ORDER BY seq LIMIT 15",
+    )?;
+
+    let mut out = Vec::new();
+    for members in cluster_prompts(&rows) {
+        let mut instances: Vec<Vec<String>> = Vec::new();
+        for &i in &members {
+            let p = &rows[i];
+            let cmd_source = p.source.trim_end_matches("_prompt");
+            // commands attributed to this prompt end where the next prompt starts
+            let next_seq = rows
+                .iter()
+                .filter(|o| o.source == p.source && o.session == p.session && o.seq > p.seq)
+                .map(|o| o.seq)
+                .min()
+                .unwrap_or(i64::MAX);
+            let mut seen = std::collections::HashSet::new();
+            let templates: Vec<String> = cmd_stmt
+                .query_map(params![cmd_source, p.session, p.seq, next_seq], |r| r.get(0))?
+                .filter_map(|t| t.ok())
+                .filter(|t: &String| seen.insert(t.clone()))
+                .collect();
+            if !templates.is_empty() {
+                instances.push(templates);
+            }
+        }
+        if instances.len() < 2 {
+            continue;
+        }
+        // a step counts as "the known routine" if most instances include it
+        let threshold = ((instances.len() as f64 * 0.6).ceil() as usize).max(2);
+        let mut freq: HashMap<&String, (usize, usize)> = HashMap::new(); // count, position sum
+        for inst in &instances {
+            for (pos, t) in inst.iter().enumerate() {
+                let e = freq.entry(t).or_default();
+                e.0 += 1;
+                e.1 += pos;
+            }
+        }
+        let mut common: Vec<(&String, usize)> = freq
+            .iter()
+            .filter(|(t, (n, _))| *n >= threshold && !is_noise(t))
+            .map(|(t, (n, pos_sum))| (*t, pos_sum / n))
+            .collect();
+        common.sort_by_key(|(_, avg_pos)| *avg_pos);
+        if common.len() < 2 {
+            continue;
+        }
+        let mut templates = vec![format!("ask: {}", representative(&rows, &members))];
+        templates.extend(common.into_iter().map(|(t, _)| t.clone()));
+        let count = members.len();
+        let score = count as f64 * (templates.len() as f64 - 1.0) * 1.5;
+        out.push(Pattern { templates, count, score });
+    }
     out.sort_by(|a, b| b.score.total_cmp(&a.score));
     Ok(out)
 }
@@ -317,11 +405,23 @@ pub struct Candidate {
 
 /// Mine everything, persist patterns, and return the undecided candidates.
 pub fn candidates(conn: &Connection, limit_per_kind: usize) -> Result<Vec<Candidate>> {
+    let intent_patterns = intents(conn)?;
+    // an intent subsumes the bare prompt cluster it grew from
+    let intent_asks: std::collections::HashSet<String> = intent_patterns
+        .iter()
+        .filter_map(|p| p.templates[0].strip_prefix("ask: ").map(String::from))
+        .collect();
+    let prompt_patterns: Vec<Pattern> = prompt_clusters(conn)?
+        .into_iter()
+        .filter(|p| !intent_asks.contains(&p.templates[0]))
+        .collect();
+
     let mut out = Vec::new();
     for (kind, patterns) in [
         ("sequence", mine(conn)?),
         ("fixloop", fix_loops(conn)?),
-        ("prompt", prompt_clusters(conn)?),
+        ("intent", intent_patterns),
+        ("prompt", prompt_patterns),
     ] {
         let mut kept = 0;
         for p in patterns {

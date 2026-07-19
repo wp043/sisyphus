@@ -58,7 +58,10 @@ Three kinds of boulder, each drafted differently:
 
 - **⚡ Repeated workflows** — frequent multi-step command sequences → drafted as a script or alias.
 - **🔁 Fix-loops** — the same command re-run after failures inside agent sessions (an execute→fail→fix→retry cycle done by hand) → drafted as a Claude Code skill that runs the whole loop.
-- **💬 Repeated prompts** — near-duplicate requests you keep typing to Claude/Codex/Gemini (Jaccard-clustered) → drafted as a skill that makes the intent a one-word command.
+- **💡 Recurring intents** — the deepest AI-side signal: a prompt you keep sending *fused with* the command routine the agent then runs every time ("summarize this PR…" + `gh pr view` → `gh pr diff` → `tsc`). Drafted as a skill with the known steps encoded, so the agent stops rediscovering them each session.
+- **💬 Repeated prompts** — near-duplicate requests you keep typing to Claude/Codex/Gemini (Jaccard-clustered) with no consistent routine yet → drafted as a skill that makes the intent a one-word command.
+
+For agent-native users (shell is just `ls`/`yazi`/`claude`/`codex`), sisyphus detects that and biases every draft toward Claude Code skills instead of shell scripts — and counts skill invocations from transcripts as usage, so `gain`/`evolve` stay honest.
 
 ## How mining works
 

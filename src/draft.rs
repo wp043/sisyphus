@@ -36,6 +36,13 @@ fn build_prompt(kind: &str, templates: &[String], count: usize, examples: &str) 
             "This command was re-run {count} times across the developer's AI-agent sessions, failing and being fixed in between — a manual execute→fix→retry loop:\n\n{}\n\nDraft a Claude Code skill (kind \"skill\") that automates the whole loop: run the command, read the errors, fix the cause, re-run, max 3 retries, then report. SKILL.md format with `name:` and `description:` frontmatter, where description states WHEN to auto-trigger.",
             templates.join("\n")
         ),
+        "intent" => {
+            let ask = templates[0].strip_prefix("ask: ").unwrap_or(&templates[0]);
+            format!(
+                "The developer has asked their AI coding agent essentially this {count} separate times:\n\n\"{ask}\"\n\nand each time, the agent ended up running these same steps:\n{}\n\nDraft a Claude Code skill (kind \"skill\") that performs this recurring intent directly — encode the known steps above so the agent executes them immediately instead of rediscovering them every session. SKILL.md format with `name:` and `description:` frontmatter, where description states WHEN to auto-trigger.",
+                templates[1..].join("\n")
+            )
+        }
         "prompt" => format!(
             "The developer has typed essentially this same request to AI coding tools {count} separate times:\n\n\"{}\"\n\nDraft a Claude Code skill (kind \"skill\") that captures this recurring intent so it becomes a one-word command. SKILL.md format with `name:` and `description:` frontmatter.",
             templates.join("\n")

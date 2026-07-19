@@ -112,10 +112,18 @@ pub fn run(conn: &Connection, days: i64) -> Result<usize> {
             }
         }
 
-        // a prompt or two
+        // a prompt, followed by what the agent then runs — the PR-review ask
+        // always leads to the same routine, planting an intent pattern
         if rng.chance(70) {
             t += 300;
-            w.cmd("claude_prompt", &session, *rng.pick(&prompts), t, false)?;
+            let prompt = *rng.pick(&prompts);
+            w.cmd("claude_prompt", &session, prompt, t, false)?;
+            if prompt.contains("PR") || prompt.contains("pull request") {
+                for step in ["gh pr view 128", "gh pr diff 128", "npx tsc --noEmit"] {
+                    t += 40 + (rng.next() % 90) as i64;
+                    w.cmd("claude", &session, step, t, false)?;
+                }
+            }
         }
     }
 
@@ -158,5 +166,21 @@ mod tests {
             .iter()
             .any(|c| c.kind == "fixloop" && c.templates[0].starts_with("cargo build"));
         assert!(fixloop, "cargo build fix-loop not mined");
+
+        // the PR ask + its routine must fuse into an intent
+        let intent = cands.iter().find(|c| c.kind == "intent");
+        let intent = intent.expect("no intent mined");
+        assert!(intent.templates[0].starts_with("ask: "), "{:?}", intent.templates);
+        assert!(
+            intent.templates.iter().any(|t| t.starts_with("gh pr view")),
+            "intent missing agent steps: {:?}",
+            intent.templates
+        );
+        // and the bare prompt cluster it grew from must not also appear
+        let ask = intent.templates[0].strip_prefix("ask: ").unwrap();
+        assert!(
+            !cands.iter().any(|c| c.kind == "prompt" && c.templates[0] == ask),
+            "intent's prompt cluster leaked through as separate candidate"
+        );
     }
 }

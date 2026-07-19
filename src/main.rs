@@ -367,6 +367,7 @@ fn report(conn: &rusqlite::Connection, limit: usize) -> Result<()> {
             let header = match c.kind.as_str() {
                 "sequence" => "⚡ repeated workflows",
                 "fixloop" => "🔁 fix-loops (execute → fail → fix → retry)",
+                "intent" => "💡 recurring intents (your ask + what the agent then runs)",
                 "prompt" => "💬 things you keep asking AI tools",
                 _ => &c.kind,
             };
