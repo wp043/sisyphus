@@ -122,8 +122,7 @@ fn data() -> Result<String> {
                 .to_string_lossy()
                 .into_owned();
             let steps = serde_json::from_str::<Vec<String>>(&seq).map(|v| v.len()).unwrap_or(1) as i64;
-            let uses: i64 =
-                conn.query_row("SELECT COUNT(*) FROM commands WHERE head = ?1", [&name], |r| r.get(0))?;
+            let uses = db::artifact_uses(&conn, &name, 0)?;
             out.push(json!({"name": name, "uses": uses, "steps": steps, "saved": uses * (steps - 1).max(0)}));
         }
         out

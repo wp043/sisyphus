@@ -188,11 +188,7 @@ fn gain(conn: &rusqlite::Connection) -> Result<()> {
             .to_string_lossy()
             .into_owned();
         let steps: i64 = serde_json::from_str::<Vec<String>>(seq).map(|v| v.len() as i64).unwrap_or(1);
-        let uses: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM commands WHERE head = ?1",
-            [&name],
-            |r| r.get(0),
-        )?;
+        let uses = db::artifact_uses(conn, &name, 0)?;
         let saved = uses * (steps - 1).max(0);
         total_steps_saved += saved;
         println!("{name:<24} used {uses}× · replaces {steps} steps · {saved} manual steps avoided");
@@ -499,11 +495,7 @@ fn evolve_findings(conn: &rusqlite::Connection) -> Result<Vec<EvolveFinding>> {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                let uses: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM commands WHERE head = ?1 AND id > ?2",
-                    rusqlite::params![name, at_id],
-                    |r| r.get(0),
-                )?;
+                let uses = db::artifact_uses(conn, &name, at_id)?;
                 if manual_since >= 2 && uses == 0 {
                     findings.push(EvolveFinding {
                         pattern_id,

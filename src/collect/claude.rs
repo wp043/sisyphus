@@ -93,6 +93,14 @@ fn ingest_file(conn: &Connection, path: &Path, project: &str) -> Result<(usize, 
             Some("assistant") => {
                 let Some(content) = v["message"]["content"].as_array() else { continue };
                 for block in content {
+                    // skill invocations are how agent-native users "run" their
+                    // accepted automations — gain/evolve count these as uses
+                    if block["type"] == "tool_use" && block["name"] == "Skill"
+                        && let Some(skill) = block["input"]["skill"].as_str() {
+                            cmd_stmt.execute(params![
+                                "claude_skill", skill, skill, ts, cwd, project, session_key, line_no
+                            ])?;
+                        }
                     if block["type"] == "tool_use" && block["name"] == "Bash"
                         && let Some(cmd) = block["input"]["command"].as_str() {
                             let head = cmd.split_whitespace().next().unwrap_or("");

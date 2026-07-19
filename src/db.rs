@@ -93,6 +93,18 @@ fn migrate(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE commands ADD COLUMN error_snippet TEXT", []);
 }
 
+/// How often an accepted artifact has been used since `since_id`: scripts and
+/// aliases show up as shell/agent command heads, skills as Skill invocations
+/// inside Claude transcripts.
+pub fn artifact_uses(conn: &Connection, name: &str, since_id: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM commands
+         WHERE id > ?2 AND (head = ?1 OR (source = 'claude_skill' AND raw = ?1))",
+        rusqlite::params![name, since_id],
+        |r| r.get(0),
+    )?)
+}
+
 /// Record the user's decision on a pattern, snapshotting where history stands
 /// so `evolve` can later see what happened after.
 pub fn decide(conn: &Connection, pattern_id: i64, decision: &str, path: Option<String>) -> Result<()> {

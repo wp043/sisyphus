@@ -66,8 +66,42 @@ Respond with STRICT JSON only, no markdown fences, matching:
 
 /// Build the full drafting prompt. Needs the DB (for examples); the actual
 /// claude call in `run_claude` doesn't, so calls can run on worker threads.
+/// Where does this user actually work? If most of their commands run inside
+/// AI agents rather than a shell, a script in ~/.local/bin will never be
+/// typed — a Claude Code skill is the artifact they'll actually invoke.
+fn agent_native(conn: &Connection) -> bool {
+    // config override: [draft] prefer = "skill" | "script" | "auto"
+    if let Ok(text) = std::fs::read_to_string(crate::theme::config_path())
+        && let Ok(v) = text.parse::<toml::Table>()
+        && let Some(p) = v.get("draft").and_then(|d| d.get("prefer")).and_then(|p| p.as_str())
+    {
+        match p {
+            "skill" => return true,
+            "script" => return false,
+            _ => {}
+        }
+    }
+    let (agent, shell): (i64, i64) = conn
+        .query_row(
+            "SELECT
+               SUM(CASE WHEN source IN ('claude','codex') THEN 1 ELSE 0 END),
+               SUM(CASE WHEN source = 'zsh' THEN 1 ELSE 0 END)
+             FROM commands",
+            [],
+            |r| Ok((r.get::<_, Option<i64>>(0)?.unwrap_or(0), r.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+        )
+        .unwrap_or((0, 0));
+    // shell that's mostly navigation + launching agents = agent-native user
+    agent > shell / 2
+}
+
 pub fn prepare_prompt(conn: &Connection, kind: &str, templates: &[String], count: usize) -> Result<String> {
     let mut ex = if kind == "prompt" { String::new() } else { examples(conn, templates)? };
+    if agent_native(conn) {
+        ex.push_str(
+            "\nIMPORTANT context about this user: they rarely type shell commands — almost all their work happens inside AI coding agents (Claude Code, Codex). A script in ~/.local/bin would never get run. Strongly prefer kind \"skill\" (a Claude Code skill they trigger with one word inside the agent), unless the workflow is inherently shell-native.\n",
+        );
+    }
     if kind == "fixloop" {
         // real failure output is the highest-signal context a fix skill can get
         let mut stmt = conn.prepare(
