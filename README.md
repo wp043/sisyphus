@@ -429,7 +429,7 @@ have regression coverage without depending on any real history.
 
 ## License
 
-[MIT](LICENSE) © 2026 Yingtong (Wendy) Pan
+[MIT](LICENSE) © 2026 Wendy Pan
 
 ---
 
