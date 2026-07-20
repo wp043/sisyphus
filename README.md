@@ -427,6 +427,10 @@ have regression coverage without depending on any real history.
 - **Meet you where you work.** Shell-native or agent-native, the artifact kind
   adapts — and skill usage inside agents counts just like a shell command.
 
+## License
+
+[MIT](LICENSE) © 2026 Yingtong (Wendy) Pan
+
 ---
 
 *Requires the [`claude`](https://claude.com/claude-code) CLI on PATH for drafting.
