@@ -604,6 +604,57 @@ impl Candidate {
     }
 }
 
+/// Impact of adopting an intent/prompt skill: the average number of commands
+/// the agent ran after the ask, before vs after a decision boundary. If the
+/// skill works, the "after" average drops (the agent invokes the skill instead
+/// of rediscovering the steps). Returns (before_avg, after_avg, n_before,
+/// n_after).
+pub fn ask_impact(conn: &Connection, ask: &str, at_id: i64) -> Result<(f64, f64, usize, usize)> {
+    let target = word_set(ask);
+    if target.is_empty() {
+        return Ok((0.0, 0.0, 0, 0));
+    }
+    let mut stmt = conn.prepare(
+        "SELECT id, source, COALESCE(session_key, ''), seq, raw FROM commands
+         WHERE source LIKE '%_prompt'",
+    )?;
+    let prompts: Vec<(i64, String, String, i64, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut count_cmds = conn.prepare(
+        "SELECT COUNT(*) FROM commands
+         WHERE source = ?1 AND session_key = ?2 AND seq > ?3 AND seq < ?4 AND template IS NOT NULL",
+    )?;
+
+    let (mut before, mut nb) = (0i64, 0usize);
+    let (mut after, mut na) = (0i64, 0usize);
+    for (id, source, session, seq, raw) in &prompts {
+        let set = word_set(raw);
+        let inter = target.intersection(&set).count();
+        let union = target.len() + set.len() - inter;
+        if inter < 2 || union == 0 || (inter as f64 / union as f64) < 0.4 {
+            continue;
+        }
+        let cmd_source = source.trim_end_matches("_prompt");
+        let next_seq = prompts
+            .iter()
+            .filter(|o| o.1 == *source && o.2 == *session && o.3 > *seq)
+            .map(|o| o.3)
+            .min()
+            .unwrap_or(i64::MAX);
+        let n: i64 = count_cmds.query_row(params![cmd_source, session, seq, next_seq], |r| r.get(0))?;
+        if *id <= at_id {
+            before += n;
+            nb += 1;
+        } else {
+            after += n;
+            na += 1;
+        }
+    }
+    let avg = |sum: i64, n: usize| if n == 0 { 0.0 } else { sum as f64 / n as f64 };
+    Ok((avg(before, nb), avg(after, na), nb, na))
+}
+
 /// Mine everything, persist patterns, and return the undecided candidates.
 /// When `project` is set, only patterns predominantly from a repo whose name
 /// contains that substring are returned.
@@ -825,6 +876,38 @@ mod tests {
         let seqs = mine(&conn).unwrap();
         let build = seqs.iter().find(|p| p.templates.iter().any(|t| t == "npm run build"));
         assert!(build.is_none() || build.unwrap().count == 1);
+    }
+
+    #[test]
+    fn ask_impact_measures_command_drop() {
+        let conn = conn_with(&[]);
+        let prompt = |seq: i64, raw: &str| {
+            conn.execute(
+                "INSERT INTO commands (source, raw, session_key, seq) VALUES ('claude_prompt', ?1, 's', ?2)",
+                params![raw, seq],
+            )
+            .unwrap();
+        };
+        let cmd = |seq: i64, tpl: &str| {
+            conn.execute(
+                "INSERT INTO commands (source, raw, template, session_key, seq) VALUES ('claude', ?1, ?1, 's', ?2)",
+                params![tpl, seq],
+            )
+            .unwrap();
+        };
+        // before: ask followed by 3 commands
+        prompt(0, "summarize this PR and check the types");
+        cmd(1, "gh pr view");
+        cmd(2, "gh pr diff");
+        cmd(3, "tsc");
+        let boundary: i64 = conn.query_row("SELECT MAX(id) FROM commands", [], |r| r.get(0)).unwrap();
+        // after: same ask, only 1 command (the skill did the rest)
+        prompt(4, "summarize the PR then check its types");
+        cmd(5, "gh pr view");
+        prompt(6, "unrelated poem request about oceans");
+        let (before, after, nb, na) = ask_impact(&conn, "summarize this PR and check the types", boundary).unwrap();
+        assert_eq!((nb, na), (1, 1));
+        assert!(before > after, "before {before} should exceed after {after}");
     }
 
     #[test]

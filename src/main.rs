@@ -183,29 +183,47 @@ fn main() -> Result<()> {
 
 fn gain(conn: &rusqlite::Connection) -> Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT d.artifact_path, p.template_seq, p.count FROM decisions d
-         JOIN patterns p ON p.id = d.pattern_id
+        "SELECT d.artifact_path, p.template_seq, p.kind, COALESCE(d.at_command_id, 0)
+         FROM decisions d JOIN patterns p ON p.id = d.pattern_id
          WHERE d.decision = 'accepted' AND d.artifact_path IS NOT NULL",
     )?;
-    let rows: Vec<(String, String, i64)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    let rows: Vec<(String, String, String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<std::result::Result<_, _>>()?;
     if rows.is_empty() {
         println!("no accepted automations yet — run `sisyphus report`");
         return Ok(());
     }
     let mut total_steps_saved = 0i64;
-    for (path, seq, _) in &rows {
+    for (path, seq, kind, at_id) in &rows {
         let name = std::path::Path::new(path)
             .file_stem()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        let steps: i64 = serde_json::from_str::<Vec<String>>(seq).map(|v| v.len() as i64).unwrap_or(1);
+        let templates: Vec<String> = serde_json::from_str(seq).unwrap_or_default();
+        let steps = templates.len().max(1) as i64;
         let uses = db::artifact_uses(conn, &name, 0)?;
         let saved = uses * (steps - 1).max(0);
         total_steps_saved += saved;
         println!("{name:<24} used {uses}× · replaces {steps} steps · {saved} manual steps avoided");
+
+        // for intent/prompt skills, show whether the agent's work for that ask
+        // actually shrank after the skill was adopted
+        if matches!(kind.as_str(), "intent" | "prompt") {
+            let ask = templates
+                .first()
+                .map(|t| t.strip_prefix("ask: ").unwrap_or(t))
+                .unwrap_or("");
+            let (before, after, nb, na) = mine::ask_impact(conn, ask, *at_id)?;
+            if nb > 0 && na > 0 {
+                let delta = if before > 0.0 { (before - after) / before * 100.0 } else { 0.0 };
+                println!(
+                    "{:24}   impact: agent ran {before:.1} → {after:.1} cmds/ask after adoption ({delta:+.0}%)",
+                    ""
+                );
+            }
+        }
     }
     println!("\ntotal manual steps avoided: {total_steps_saved}");
     Ok(())
