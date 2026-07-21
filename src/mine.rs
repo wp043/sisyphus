@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rusqlite::{Connection, params};
+use serde::Serialize;
 use std::collections::HashMap;
 
 const MIN_LEN: usize = 2;
@@ -526,6 +527,7 @@ pub fn intents(conn: &Connection) -> Result<Vec<Pattern>> {
     Ok(out)
 }
 
+#[derive(Serialize)]
 pub struct Candidate {
     pub id: i64,
     pub kind: String,

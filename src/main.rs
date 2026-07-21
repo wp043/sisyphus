@@ -50,6 +50,9 @@ enum Cmd {
         /// Only show patterns from repos whose name contains this substring
         #[arg(long)]
         project: Option<String>,
+        /// Emit the mined patterns as JSON (no drafting)
+        #[arg(long)]
+        json: bool,
     },
     /// Draft an automation for one pattern and print it (no install)
     Draft {
@@ -132,9 +135,12 @@ fn main() -> Result<()> {
             );
         }
         Cmd::Stats => stats(&conn)?,
-        Cmd::Report { limit, auto, plain, project } => {
+        Cmd::Report { limit, auto, plain, project, json } => {
             let proj = project.as_deref();
-            if auto {
+            if json {
+                let cands = mine::candidates(&conn, limit, proj)?;
+                println!("{}", serde_json::to_string_pretty(&cands)?);
+            } else if auto {
                 report_auto(&conn, limit, proj)?;
             } else if plain || !std::io::stdin().is_terminal() {
                 report(&conn, limit, proj)?;
