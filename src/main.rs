@@ -47,6 +47,9 @@ enum Cmd {
         /// Plain line-by-line output instead of the TUI
         #[arg(long)]
         plain: bool,
+        /// Only show patterns from repos whose name contains this substring
+        #[arg(long)]
+        project: Option<String>,
     },
     /// Draft an automation for one pattern and print it (no install)
     Draft {
@@ -129,13 +132,14 @@ fn main() -> Result<()> {
             );
         }
         Cmd::Stats => stats(&conn)?,
-        Cmd::Report { limit, auto, plain } => {
+        Cmd::Report { limit, auto, plain, project } => {
+            let proj = project.as_deref();
             if auto {
-                report_auto(&conn, limit)?;
+                report_auto(&conn, limit, proj)?;
             } else if plain || !std::io::stdin().is_terminal() {
-                report(&conn, limit)?;
+                report(&conn, limit, proj)?;
             } else {
-                tui::run(&conn, limit)?;
+                tui::run(&conn, limit, proj)?;
             }
         }
         Cmd::Draft { id } => {
@@ -203,7 +207,7 @@ fn gain(conn: &rusqlite::Connection) -> Result<()> {
 
 fn scan(conn: &rusqlite::Connection) -> Result<()> {
     const NOTIFY_THRESHOLD: f64 = 8.0;
-    let cands = mine::candidates(conn, 5)?;
+    let cands = mine::candidates(conn, 5, None)?;
     let mut fresh = Vec::new();
     for c in &cands {
         if c.score < NOTIFY_THRESHOLD {
@@ -304,8 +308,8 @@ fn watch(install: bool, uninstall: bool) -> Result<()> {
 
 /// Draft every undecided pattern in parallel (3 claude workers) and install
 /// whatever parses cleanly. The trust-the-machine mode.
-fn report_auto(conn: &rusqlite::Connection, limit: usize) -> Result<()> {
-    let cands = mine::candidates(conn, limit)?;
+fn report_auto(conn: &rusqlite::Connection, limit: usize, project: Option<&str>) -> Result<()> {
+    let cands = mine::candidates(conn, limit, project)?;
     if cands.is_empty() {
         println!("no undecided patterns — nothing to draft");
         return Ok(());
@@ -358,8 +362,8 @@ fn report_auto(conn: &rusqlite::Connection, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn report(conn: &rusqlite::Connection, limit: usize) -> Result<()> {
-    let cands = mine::candidates(conn, limit)?;
+fn report(conn: &rusqlite::Connection, limit: usize, project: Option<&str>) -> Result<()> {
+    let cands = mine::candidates(conn, limit, project)?;
     if cands.is_empty() {
         println!("no undecided patterns found — ingest more history or lower thresholds");
         return Ok(());

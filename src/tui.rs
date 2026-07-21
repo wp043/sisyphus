@@ -39,8 +39,8 @@ fn kind_icon(kind: &str) -> &'static str {
     }
 }
 
-pub fn run(conn: &Connection, limit: usize) -> Result<()> {
-    let cands = mine::candidates(conn, limit)?;
+pub fn run(conn: &Connection, limit: usize, project: Option<&str>) -> Result<()> {
+    let cands = mine::candidates(conn, limit, project)?;
     if cands.is_empty() {
         println!("no undecided patterns — the boulder rests 🪨");
         return Ok(());

@@ -603,7 +603,13 @@ impl Candidate {
 }
 
 /// Mine everything, persist patterns, and return the undecided candidates.
-pub fn candidates(conn: &Connection, limit_per_kind: usize) -> Result<Vec<Candidate>> {
+/// When `project` is set, only patterns predominantly from a repo whose name
+/// contains that substring are returned.
+pub fn candidates(
+    conn: &Connection,
+    limit_per_kind: usize,
+    project: Option<&str>,
+) -> Result<Vec<Candidate>> {
     let intent_patterns = intents(conn)?;
     // an intent subsumes the bare prompt cluster it grew from
     let intent_asks: std::collections::HashSet<String> = intent_patterns
@@ -638,18 +644,30 @@ pub fn candidates(conn: &Connection, limit_per_kind: usize) -> Result<Vec<Candid
             let decided: bool = conn
                 .query_row("SELECT 1 FROM decisions WHERE pattern_id = ?1", params![id], |_| Ok(true))
                 .unwrap_or(false);
-            if !decided && kept < limit_per_kind {
-                kept += 1;
-                let project = pattern_project(conn, &p.templates)?;
-                out.push(Candidate {
-                    id,
-                    kind: kind.into(),
-                    templates: p.templates,
-                    count: p.count,
-                    score: p.score,
-                    project,
-                });
+            if decided || kept >= limit_per_kind {
+                continue;
             }
+            let pat_project = pattern_project(conn, &p.templates)?;
+            // when filtering by project, a pattern must belong to it (and the
+            // limit applies after filtering, so a repo's lower-ranked patterns
+            // still surface)
+            if let Some(want) = project {
+                let matches = pat_project
+                    .as_deref()
+                    .is_some_and(|p| p.to_lowercase().contains(&want.to_lowercase()));
+                if !matches {
+                    continue;
+                }
+            }
+            kept += 1;
+            out.push(Candidate {
+                id,
+                kind: kind.into(),
+                templates: p.templates,
+                count: p.count,
+                score: p.score,
+                project: pat_project,
+            });
         }
     }
     Ok(out)

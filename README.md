@@ -155,6 +155,7 @@ misjudge an adopted skill as unused. Force the behaviour with
 | `sisyphus report` | Full-screen TUI: browse patterns, draft with Claude, accept/ignore. |
 | `sisyphus report --auto` | Draft **every** undecided pattern in parallel and install each draft. |
 | `sisyphus report --plain` | Line-by-line output instead of the TUI (also used when piped). |
+| `sisyphus report --project <name>` | Only patterns from repos whose name contains the substring. |
 | `sisyphus draft <id>` | Draft one pattern non-interactively and print it (no install). |
 | `sisyphus gain` | Report whether accepted automations are actually being used. |
 | `sisyphus evolve` | Act on adoption feedback: revise unused artifacts, resurface ignored patterns. |

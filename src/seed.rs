@@ -145,7 +145,7 @@ mod tests {
         let n = run(&conn, 21).unwrap();
         assert!(n > 100, "seeded only {n} commands");
 
-        let cands = mine::candidates(&conn, 10).unwrap();
+        let cands = mine::candidates(&conn, 10, None).unwrap();
         let kinds: std::collections::HashSet<_> =
             cands.iter().map(|c| c.kind.clone()).collect();
         assert!(kinds.contains("sequence"), "no sequences found");
