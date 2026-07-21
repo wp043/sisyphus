@@ -144,6 +144,29 @@ pub fn draft_pattern(conn: &Connection, kind: &str, templates: &[String], count:
     run_claude(&prepare_prompt(conn, kind, templates, count)?)
 }
 
+/// Ask claude to group prompts by shared intent. Returns groups of indices.
+pub fn claude_group(prompt: &str) -> Result<Vec<Vec<usize>>> {
+    let out = Command::new("claude")
+        .args(["-p", prompt])
+        .output()
+        .context("failed to run `claude`")?;
+    if !out.status.success() {
+        bail!("claude -p failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    parse_groups(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Extract a JSON array-of-arrays of indices from claude's (possibly fenced or
+/// prose-wrapped) output.
+fn parse_groups(text: &str) -> Result<Vec<Vec<usize>>> {
+    let start = text.find('[').context("no JSON array in claude output")?;
+    let end = text.rfind(']').context("no JSON array in claude output")?;
+    if end < start {
+        bail!("malformed JSON array in claude output");
+    }
+    Ok(serde_json::from_str(&text[start..=end])?)
+}
+
 fn parse_draft(text: &str) -> Result<Draft> {
     // tolerate markdown fences or prose around the JSON object
     let start = text.find('{').context("no JSON in claude output")?;
@@ -305,6 +328,14 @@ mod tests {
     fn parses_fenced_json() {
         let d = parse_draft("```json\n{\"name\":\"git-init-push\",\"kind\":\"script\",\"summary\":\"s\",\"content\":\"c\"}\n```").unwrap();
         assert_eq!(d.name, "git-init-push");
+    }
+
+    #[test]
+    fn parses_group_json() {
+        assert_eq!(parse_groups("[[0,4,9],[2,3]]").unwrap(), vec![vec![0, 4, 9], vec![2, 3]]);
+        // fenced / prose-wrapped
+        assert_eq!(parse_groups("here:\n```json\n[[1,2,3]]\n```").unwrap(), vec![vec![1, 2, 3]]);
+        assert!(parse_groups("no array here").is_err());
     }
 
     #[test]

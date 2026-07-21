@@ -53,6 +53,9 @@ enum Cmd {
         /// Emit the mined patterns as JSON (no drafting)
         #[arg(long)]
         json: bool,
+        /// Cluster prompts by meaning via claude (opt-in; sends prompts to claude)
+        #[arg(long)]
+        semantic: bool,
     },
     /// Draft an automation for one pattern and print it (no install)
     Draft {
@@ -135,17 +138,17 @@ fn main() -> Result<()> {
             );
         }
         Cmd::Stats => stats(&conn)?,
-        Cmd::Report { limit, auto, plain, project, json } => {
+        Cmd::Report { limit, auto, plain, project, json, semantic } => {
             let proj = project.as_deref();
             if json {
-                let cands = mine::candidates(&conn, limit, proj)?;
+                let cands = mine::candidates(&conn, limit, proj, semantic)?;
                 println!("{}", serde_json::to_string_pretty(&cands)?);
             } else if auto {
-                report_auto(&conn, limit, proj)?;
+                report_auto(&conn, limit, proj, semantic)?;
             } else if plain || !std::io::stdin().is_terminal() {
-                report(&conn, limit, proj)?;
+                report(&conn, limit, proj, semantic)?;
             } else {
-                tui::run(&conn, limit, proj)?;
+                tui::run(&conn, limit, proj, semantic)?;
             }
         }
         Cmd::Draft { id } => {
@@ -231,7 +234,7 @@ fn gain(conn: &rusqlite::Connection) -> Result<()> {
 
 fn scan(conn: &rusqlite::Connection) -> Result<()> {
     const NOTIFY_THRESHOLD: f64 = 8.0;
-    let cands = mine::candidates(conn, 5, None)?;
+    let cands = mine::candidates(conn, 5, None, false)?;
     let mut fresh = Vec::new();
     for c in &cands {
         if c.score < NOTIFY_THRESHOLD {
@@ -332,8 +335,8 @@ fn watch(install: bool, uninstall: bool) -> Result<()> {
 
 /// Draft every undecided pattern in parallel (3 claude workers) and install
 /// whatever parses cleanly. The trust-the-machine mode.
-fn report_auto(conn: &rusqlite::Connection, limit: usize, project: Option<&str>) -> Result<()> {
-    let cands = mine::candidates(conn, limit, project)?;
+fn report_auto(conn: &rusqlite::Connection, limit: usize, project: Option<&str>, semantic: bool) -> Result<()> {
+    let cands = mine::candidates(conn, limit, project, semantic)?;
     if cands.is_empty() {
         println!("no undecided patterns — nothing to draft");
         return Ok(());
@@ -389,8 +392,8 @@ fn report_auto(conn: &rusqlite::Connection, limit: usize, project: Option<&str>)
     Ok(())
 }
 
-fn report(conn: &rusqlite::Connection, limit: usize, project: Option<&str>) -> Result<()> {
-    let cands = mine::candidates(conn, limit, project)?;
+fn report(conn: &rusqlite::Connection, limit: usize, project: Option<&str>, semantic: bool) -> Result<()> {
+    let cands = mine::candidates(conn, limit, project, semantic)?;
     if cands.is_empty() {
         println!("no undecided patterns found — ingest more history or lower thresholds");
         return Ok(());

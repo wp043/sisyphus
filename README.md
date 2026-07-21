@@ -156,6 +156,9 @@ misjudge an adopted skill as unused. Force the behaviour with
 | `sisyphus report --auto` | Draft **every** undecided pattern in parallel and install each draft. |
 | `sisyphus report --plain` | Line-by-line output instead of the TUI (also used when piped). |
 | `sisyphus report --project <name>` | Only patterns from repos whose name contains the substring. |
+| `sisyphus report --json` | Emit mined patterns as JSON instead of drafting. |
+| `sisyphus report --semantic` | Cluster prompts by meaning via one `claude` call (opt-in). |
+| `sisyphus gain` | Adoption + skill-impact: does the agent do less after a skill? |
 | `sisyphus draft <id>` | Draft one pattern non-interactively and print it (no install). |
 | `sisyphus gain` | Report whether accepted automations are actually being used. |
 | `sisyphus evolve` | Act on adoption feedback: revise unused artifacts, resurface ignored patterns. |
@@ -235,7 +238,9 @@ flowchart TD
    Codex output heuristics; the error text is stored for drafting.
 4. **Prompt clustering** groups near-duplicate prompts by Jaccard similarity over
    word sets (stopwords and interchangeable verbs like *write/generate/draft*
-   stripped so paraphrases merge).
+   stripped so paraphrases merge). `--semantic` swaps this for one `claude` call
+   that groups by meaning — catching paraphrases that share no words, even across
+   languages — at the cost of sending your prompts to claude (hence opt-in).
 5. **Intent mining** fuses each prompt cluster with the commands the agent ran
    between that prompt and the next one; steps present in ≥60% of instances become
    the intent's known routine.

@@ -604,6 +604,43 @@ impl Candidate {
     }
 }
 
+/// Semantic prompt clustering (opt-in): instead of lexical word overlap, ask
+/// claude to group the prompts by shared intent, catching paraphrases that
+/// share no words ("summarize the PR" vs "give me an overview of the changes").
+/// One claude call; falls back to an empty result on any failure.
+pub fn semantic_prompt_clusters(conn: &Connection) -> Result<Vec<Pattern>> {
+    let rows = load_prompts(conn)?;
+    if rows.len() < 3 {
+        return Ok(vec![]);
+    }
+    let list = rows
+        .iter()
+        .enumerate()
+        .map(|(i, p)| format!("{i}: {}", p.raw))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "These are prompts a developer sent to AI coding agents. Group the ones \
+         that express the SAME recurring intent (paraphrases of each other). Only \
+         groups of 3 or more members matter — omit singletons and pairs. Respond \
+         with STRICT JSON only: an array of arrays of the integer ids, e.g. \
+         [[0,4,9],[2,3,7]].\n\n{list}"
+    );
+    let groups = crate::draft::claude_group(&prompt)?;
+    let mut out = Vec::new();
+    for g in groups {
+        let members: Vec<usize> = g.into_iter().filter(|&i| i < rows.len()).collect();
+        if members.len() < 3 {
+            continue;
+        }
+        let count = members.len();
+        let rep = representative(&rows, &members);
+        out.push(Pattern { templates: vec![rep], count, score: count as f64 * 2.0 });
+    }
+    out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    Ok(out)
+}
+
 /// Impact of adopting an intent/prompt skill: the average number of commands
 /// the agent ran after the ask, before vs after a decision boundary. If the
 /// skill works, the "after" average drops (the agent invokes the skill instead
@@ -662,6 +699,7 @@ pub fn candidates(
     conn: &Connection,
     limit_per_kind: usize,
     project: Option<&str>,
+    semantic: bool,
 ) -> Result<Vec<Candidate>> {
     let intent_patterns = intents(conn)?;
     // an intent subsumes the bare prompt cluster it grew from
@@ -669,7 +707,12 @@ pub fn candidates(
         .iter()
         .filter_map(|p| p.templates[0].strip_prefix("ask: ").map(String::from))
         .collect();
-    let prompt_patterns: Vec<Pattern> = prompt_clusters(conn)?
+    let raw_prompts = if semantic {
+        semantic_prompt_clusters(conn)?
+    } else {
+        prompt_clusters(conn)?
+    };
+    let prompt_patterns: Vec<Pattern> = raw_prompts
         .into_iter()
         .filter(|p| !intent_asks.contains(&p.templates[0]))
         .collect();
