@@ -44,6 +44,24 @@ fn extract_command(payload: &Value) -> Option<String> {
     None
 }
 
+/// Parse Codex's exec-output wrapper into (exit code, real output body).
+/// Format: "Chunk ID: …\nWall time: …\nProcess exited with code N\n
+/// Original token count: …\nOutput:\n<body>". Returns None for non-exec
+/// outputs (e.g. web-search results) that carry no exit code.
+fn parse_result(output: &str) -> Option<(i32, String)> {
+    let code: i32 = output
+        .lines()
+        .find_map(|l| l.strip_prefix("Process exited with code "))?
+        .trim()
+        .parse()
+        .ok()?;
+    let body = output
+        .split_once("Output:\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    Some((code, body))
+}
+
 pub fn ingest(conn: &Connection) -> Result<(usize, usize)> {
     let (mut cmds, mut prompts) = (0usize, 0usize);
     for path in session_files() {
@@ -102,25 +120,23 @@ fn ingest_file(conn: &Connection, path: &Path) -> Result<(usize, usize)> {
                 }
             }
             (Some("response_item"), Some("function_call_output")) => {
-                let failed = payload["output"]
-                    .as_str()
-                    .map(|o| {
-                        let head = o.get(..120).unwrap_or(o).to_ascii_lowercase();
-                        head.contains("failed:") || head.contains("error:") || head.contains("exited with code")
-                    })
-                    .unwrap_or(false);
-                if failed
-                    && let Some(row) =
-                        payload["call_id"].as_str().and_then(|id| call_rows.get(id))
-                    {
-                        let snippet = payload["output"]
-                            .as_str()
-                            .map(|s| s.chars().take(300).collect::<String>());
-                        conn.execute(
-                            "UPDATE commands SET failed = 1, error_snippet = ?2 WHERE id = ?1",
-                            params![row, snippet],
-                        )?;
-                    }
+                // Codex wraps exec output as "…Process exited with code N…
+                // Output:\n<body>". Judge failure by the real exit code, not a
+                // substring (which matched every "exited with code 0" success).
+                if let (Some((code, body)), Some(row)) = (
+                    payload["output"].as_str().and_then(parse_result),
+                    payload["call_id"].as_str().and_then(|id| call_rows.get(id)),
+                ) && code != 0
+                {
+                    let snippet: Option<String> = {
+                        let s: String = body.trim().chars().take(300).collect();
+                        (!s.is_empty()).then_some(s)
+                    };
+                    conn.execute(
+                        "UPDATE commands SET failed = 1, error_snippet = ?2 WHERE id = ?1",
+                        params![row, snippet],
+                    )?;
+                }
             }
             (Some("event_msg"), Some("user_message")) => {
                 if let Some(text) = payload["message"].as_str() {
@@ -166,5 +182,24 @@ mod tests {
     fn ignores_other_tools() {
         let p = json!({"name":"apply_patch","arguments":"{}"});
         assert_eq!(extract_command(&p), None);
+    }
+
+    #[test]
+    fn exit_code_zero_is_not_a_failure() {
+        let out = "Chunk ID: abc\nWall time: 0.5 seconds\nProcess exited with code 0\nOriginal token count: 85\nOutput:\nfile1\nfile2\n";
+        assert_eq!(parse_result(out), Some((0, "file1\nfile2\n".into())));
+    }
+
+    #[test]
+    fn nonzero_exit_captures_body() {
+        let out = "Chunk ID: x\nWall time: 8.7 seconds\nProcess exited with code 1\nOriginal token count: 42\nOutput:\nerror[E0502]: cannot borrow `x`\n";
+        let (code, body) = parse_result(out).unwrap();
+        assert_eq!(code, 1);
+        assert!(body.contains("E0502"));
+    }
+
+    #[test]
+    fn non_exec_output_has_no_code() {
+        assert_eq!(parse_result("[{\"type\":\"input_text\"}]"), None);
     }
 }
