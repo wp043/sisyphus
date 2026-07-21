@@ -258,17 +258,41 @@ struct PromptRow {
     raw: String,
 }
 
+/// Minimum distinct content words a prompt must have to be clusterable. Below
+/// this, near-empty word sets cluster on a single shared token and inflate
+/// counts ("add certificate" pooling with every other 1-word ask).
+const MIN_CONTENT_WORDS: usize = 3;
+
+/// Skill directives and tool wrappers that ride in the prompt stream but aren't
+/// natural-language asks (e.g. "$autonomous-skill …", slash commands).
+fn is_directive(raw: &str) -> bool {
+    let t = raw.trim_start();
+    t.starts_with('$') || t.starts_with('/') || t.starts_with('!')
+}
+
 fn load_prompts(conn: &Connection) -> Result<Vec<PromptRow>> {
     let mut stmt = conn.prepare(
         "SELECT source, COALESCE(session_key, ''), seq, raw FROM commands
          WHERE source LIKE '%_prompt' AND LENGTH(raw) BETWEEN 12 AND 300",
     )?;
-    let rows = stmt
+    let rows: Vec<PromptRow> = stmt
         .query_map([], |r| {
             Ok(PromptRow { source: r.get(0)?, session: r.get(1)?, seq: r.get(2)?, raw: r.get(3)? })
         })?
         .collect::<std::result::Result<_, _>>()?;
-    Ok(rows)
+
+    // Deduplicate identical prompt text. Agent transcripts overlap heavily:
+    // when a long conversation continues into a new session file, the whole
+    // prior exchange is replayed with fresh timestamps, so one real utterance
+    // is stored many times. A user doesn't type the same sentence verbatim
+    // across genuinely separate sessions — exact-identical text is an overlap
+    // artifact. Near-duplicate clustering still catches real paraphrase repeats.
+    let mut seen = std::collections::HashSet::new();
+    Ok(rows
+        .into_iter()
+        .filter(|p| !is_directive(&p.raw) && word_set(&p.raw).len() >= MIN_CONTENT_WORDS)
+        .filter(|p| seen.insert(p.raw.clone()))
+        .collect())
 }
 
 /// Union-find clustering of near-duplicate prompts (Jaccard over word sets);
@@ -286,7 +310,9 @@ fn cluster_prompts(rows: &[PromptRow]) -> Vec<Vec<usize>> {
         for j in i + 1..rows.len() {
             let inter = sets[i].intersection(&sets[j]).count();
             let union = sets[i].len() + sets[j].len() - inter;
-            if union > 0 && inter as f64 / union as f64 >= 0.4 {
+            // require real overlap (≥2 shared words) AND a high ratio, so a
+            // single coincidental token can't fuse two unrelated asks
+            if inter >= 2 && union > 0 && inter as f64 / union as f64 >= 0.4 {
                 let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
                 if ri != rj {
                     parent[ri] = rj;
@@ -574,6 +600,28 @@ mod tests {
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].count, 3);
         assert!(clusters[0].templates[0].contains("summarize"));
+    }
+
+    #[test]
+    fn short_oneoffs_do_not_pool() {
+        let conn = conn_with(&[]);
+        // distinct short asks sharing at most one incidental word, plus a
+        // skill directive — none should cluster or inflate a count
+        let prompts = [
+            "add certificate",
+            "add license file",
+            "fix the build",
+            "$autonomous-skill build recommended features autonomously",
+            "yes change to wendy pan",
+        ];
+        for (i, p) in prompts.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO commands (source, raw, session_key, seq) VALUES ('claude_prompt', ?1, 's1', ?2)",
+                params![p, i as i64],
+            )
+            .unwrap();
+        }
+        assert!(prompt_clusters(&conn).unwrap().is_empty());
     }
 
     #[test]
