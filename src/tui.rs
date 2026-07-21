@@ -221,7 +221,7 @@ fn draw(f: &mut Frame, items: &[Item], selected: usize, active: usize, auto_acce
                 format!("{} {} ", kind_icon(&it.cand.kind), it.cand.kind),
                 Style::default().fg(t.kind(&it.cand.kind)).bold(),
             ),
-            Span::styled(format!("seen {}× · score {:.0}", it.cand.count, it.cand.score), Style::default().fg(t.dim)),
+            Span::styled(format!("seen {}× · {}", it.cand.count, it.cand.cost_label()), Style::default().fg(t.dim)),
         ]),
         Line::raw(""),
     ];

@@ -377,7 +377,7 @@ fn report(conn: &rusqlite::Connection, limit: usize) -> Result<()> {
             };
             println!("\n{header}");
         }
-        println!("\n  #{} (pattern {}) — seen {}× · score {:.0}", rank + 1, c.id, c.count, c.score);
+        println!("\n  #{} (pattern {}) — seen {}× · {}", rank + 1, c.id, c.count, c.cost_label());
         for (i, tpl) in c.templates.iter().enumerate() {
             let arrow = if i == 0 { " " } else { "→" };
             println!("     {arrow} {tpl}");

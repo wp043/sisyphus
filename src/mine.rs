@@ -39,6 +39,53 @@ pub struct Pattern {
     pub score: f64,
 }
 
+/// Estimated wall-clock seconds a step costs: its recorded command duration
+/// when known, otherwise the gap until the next action in the same session
+/// (capped at 5 min so idle time doesn't skew it). Returns per-template medians
+/// plus a global fallback for templates without timing data — this is what
+/// turns "seen 14×" into "~84 min wasted".
+fn template_seconds(conn: &Connection) -> Result<(HashMap<String, f64>, f64)> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(session_key, ''), template, ts, duration_ms FROM commands
+         WHERE template IS NOT NULL
+         ORDER BY source, session_key, seq",
+    )?;
+    let rows: Vec<(String, String, Option<i64>, Option<i64>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+
+    let mut per: HashMap<String, Vec<f64>> = HashMap::new();
+    for (i, (sess, tpl, ts, dur)) in rows.iter().enumerate() {
+        let secs = if let Some(ms) = dur {
+            (*ms as f64 / 1000.0).clamp(0.0, 300.0)
+        } else if let (Some(t0), Some(next)) = (ts, rows.get(i + 1)) {
+            // gap to the next action, but only within the same session
+            match (next.0 == *sess, next.2) {
+                (true, Some(t1)) => ((t1 - t0).max(0) as f64).min(300.0),
+                _ => continue,
+            }
+        } else {
+            continue;
+        };
+        per.entry(tpl.clone()).or_default().push(secs);
+    }
+
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(|a, b| a.total_cmp(b));
+        v[v.len() / 2]
+    };
+    let mut medians = HashMap::new();
+    let mut all = Vec::new();
+    for (t, mut v) in per {
+        let m = median(&mut v);
+        all.push(m);
+        medians.insert(t, m);
+    }
+    // a sensible default when a step has never been timed
+    let fallback = if all.is_empty() { 12.0 } else { median(&mut all) };
+    Ok((medians, fallback))
+}
+
 /// Detect transcript overlap and record it. Agent tools re-log a continued
 /// conversation into a fresh session file that replays all prior events, so a
 /// continuation file's event stream is a prefix of (or identical to) the more
@@ -232,6 +279,7 @@ pub fn mine(conn: &Connection) -> Result<Vec<Pattern>> {
         }
     }
 
+    let (secs, fallback) = template_seconds(conn)?;
     let mut patterns: Vec<Pattern> = by_rotation
         .into_values()
         .filter(|(gram, _)| {
@@ -239,7 +287,9 @@ pub fn mine(conn: &Connection) -> Result<Vec<Pattern>> {
             distinct.len() >= 2 && !gram.iter().all(|t| is_noise(t))
         })
         .map(|(templates, count)| {
-            let score = count as f64 * (templates.len() as f64 - 1.0);
+            // score = total estimated seconds spent doing this by hand
+            let per_run: f64 = templates.iter().map(|t| secs.get(t).copied().unwrap_or(fallback)).sum();
+            let score = count as f64 * per_run;
             Pattern { templates, count, score }
         })
         .collect();
@@ -266,17 +316,18 @@ pub fn fix_loops(conn: &Connection) -> Result<Vec<Pattern>> {
     let rows = stmt.query_map([], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(3)?))
     })?;
+    let (secs, fallback) = template_seconds(conn)?;
     let mut out = Vec::new();
     for row in rows {
         let (template, runs, sessions) = row?;
         if is_noise(&template) {
             continue;
         }
-        out.push(Pattern {
-            templates: vec![template],
-            count: runs as usize,
-            score: runs as f64 * sessions as f64,
-        });
+        // a failing retry loop wastes more than nominal runtime (debugging
+        // between tries); weight by how many sessions it plagued
+        let per_run = secs.get(&template).copied().unwrap_or(fallback);
+        let score = runs as f64 * per_run * (1.0 + sessions as f64 * 0.25);
+        out.push(Pattern { templates: vec![template], count: runs as usize, score });
     }
     Ok(out)
 }
@@ -407,6 +458,7 @@ pub fn prompt_clusters(conn: &Connection) -> Result<Vec<Pattern>> {
 /// steps stop being rediscovered from scratch every time.
 pub fn intents(conn: &Connection) -> Result<Vec<Pattern>> {
     let rows = load_prompts(conn)?;
+    let (secs, fallback) = template_seconds(conn)?;
     let mut cmd_stmt = conn.prepare(
         "SELECT template FROM commands
          WHERE source = ?1 AND session_key = ?2 AND seq > ?3 AND seq < ?4
@@ -459,10 +511,14 @@ pub fn intents(conn: &Connection) -> Result<Vec<Pattern>> {
         if common.len() < 2 {
             continue;
         }
-        let mut templates = vec![format!("ask: {}", representative(&rows, &members))];
-        templates.extend(common.into_iter().map(|(t, _)| t.clone()));
+        let steps: Vec<String> = common.into_iter().map(|(t, _)| t.clone()).collect();
+        // time saved per invocation = the routine the agent no longer rediscovers,
+        // weighted up because the ask itself is recurring
+        let per_run: f64 = steps.iter().map(|t| secs.get(t).copied().unwrap_or(fallback)).sum();
         let count = members.len();
-        let score = count as f64 * (templates.len() as f64 - 1.0) * 1.5;
+        let score = count as f64 * per_run * 1.5;
+        let mut templates = vec![format!("ask: {}", representative(&rows, &members))];
+        templates.extend(steps);
         out.push(Pattern { templates, count, score });
     }
     out.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -475,6 +531,23 @@ pub struct Candidate {
     pub templates: Vec<String>,
     pub count: usize,
     pub score: f64,
+}
+
+impl Candidate {
+    /// Human label for the pattern's cost. Command-based kinds carry an
+    /// estimated total time spent doing this by hand across history; prompt
+    /// clusters have no command timing, so they fall back to a raw score.
+    pub fn cost_label(&self) -> String {
+        if self.kind == "prompt" {
+            return format!("score {:.0}", self.score);
+        }
+        let mins = self.score / 60.0;
+        if mins >= 1.0 {
+            format!("~{mins:.0} min by hand")
+        } else {
+            format!("~{:.0}s by hand", self.score)
+        }
+    }
 }
 
 /// Mine everything, persist patterns, and return the undecided candidates.
