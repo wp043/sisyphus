@@ -532,6 +532,57 @@ pub struct Candidate {
     pub templates: Vec<String>,
     pub count: usize,
     pub score: f64,
+    pub project: Option<String>,
+}
+
+/// The repo a pattern predominantly lives in: the basename of the most common
+/// working directory among commands matching its most distinctive step. Lets
+/// the report say "this deploy dance is in fitlens".
+pub fn pattern_project(conn: &Connection, templates: &[String]) -> Result<Option<String>> {
+    // the "ask:" head isn't a command; pick the first real step to match on
+    let Some(step) = templates.iter().find(|t| !t.starts_with("ask: ")) else {
+        return Ok(None);
+    };
+    let cwd: Option<String> = conn
+        .query_row(
+            "SELECT cwd FROM commands
+             WHERE template = ?1 AND cwd IS NOT NULL AND cwd != ''
+             GROUP BY cwd ORDER BY COUNT(*) DESC LIMIT 1",
+            params![step],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(cwd.and_then(|p| {
+        p.trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    }))
+}
+
+/// How many times an ask (a prompt cluster's representative) recurred after a
+/// decision — the prompt-side analogue of `occurrences_since`, used by evolve
+/// to judge intent/prompt adoption (their patterns aren't command sequences).
+pub fn ask_recurrence_since(conn: &Connection, ask: &str, min_id: i64) -> Result<usize> {
+    let target = word_set(ask);
+    if target.is_empty() {
+        return Ok(0);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT raw FROM commands WHERE source LIKE '%_prompt' AND id > ?1",
+    )?;
+    let mut n = 0;
+    let rows = stmt.query_map(params![min_id], |r| r.get::<_, String>(0))?;
+    for raw in rows {
+        let set = word_set(&raw?);
+        let inter = target.intersection(&set).count();
+        let union = target.len() + set.len() - inter;
+        if inter >= 2 && union > 0 && inter as f64 / union as f64 >= 0.4 {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 impl Candidate {
@@ -589,12 +640,14 @@ pub fn candidates(conn: &Connection, limit_per_kind: usize) -> Result<Vec<Candid
                 .unwrap_or(false);
             if !decided && kept < limit_per_kind {
                 kept += 1;
+                let project = pattern_project(conn, &p.templates)?;
                 out.push(Candidate {
                     id,
                     kind: kind.into(),
                     templates: p.templates,
                     count: p.count,
                     score: p.score,
+                    project,
                 });
             }
         }
@@ -752,6 +805,24 @@ mod tests {
         let seqs = mine(&conn).unwrap();
         let build = seqs.iter().find(|p| p.templates.iter().any(|t| t == "npm run build"));
         assert!(build.is_none() || build.unwrap().count == 1);
+    }
+
+    #[test]
+    fn ask_recurrence_counts_matches_after_boundary() {
+        let conn = conn_with(&[]);
+        let add = |seq: i64, raw: &str| {
+            conn.execute(
+                "INSERT INTO commands (source, raw, session_key, seq) VALUES ('claude_prompt', ?1, 's', ?2)",
+                params![raw, seq],
+            )
+            .unwrap();
+        };
+        add(0, "summarize this PR and check the types");
+        let boundary: i64 = conn.query_row("SELECT MAX(id) FROM commands", [], |r| r.get(0)).unwrap();
+        add(1, "please summarize the PR then check its types"); // recurrence after
+        add(2, "write a poem about the ocean"); // unrelated
+        let n = ask_recurrence_since(&conn, "summarize this PR and check the types", boundary).unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]

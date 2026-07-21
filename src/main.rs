@@ -377,7 +377,8 @@ fn report(conn: &rusqlite::Connection, limit: usize) -> Result<()> {
             };
             println!("\n{header}");
         }
-        println!("\n  #{} (pattern {}) — seen {}× · {}", rank + 1, c.id, c.count, c.cost_label());
+        let proj = c.project.as_deref().map(|p| format!(" · {p}")).unwrap_or_default();
+        println!("\n  #{} (pattern {}){proj} — seen {}× · {}", rank + 1, c.id, c.count, c.cost_label());
         for (i, tpl) in c.templates.iter().enumerate() {
             let arrow = if i == 0 { " " } else { "→" };
             println!("     {arrow} {tpl}");
@@ -479,19 +480,27 @@ enum FindingKind {
 fn evolve_findings(conn: &rusqlite::Connection) -> Result<Vec<EvolveFinding>> {
     let mut stmt = conn.prepare(
         "SELECT d.pattern_id, d.decision, d.artifact_path, COALESCE(d.at_command_id, 0),
-                COALESCE(d.count_at_decision, 0), p.template_seq
+                COALESCE(d.count_at_decision, 0), p.template_seq, p.kind
          FROM decisions d JOIN patterns p ON p.id = d.pattern_id",
     )?;
-    let rows: Vec<(i64, String, Option<String>, i64, i64, String)> = stmt
+    let rows: Vec<(i64, String, Option<String>, i64, i64, String, String)> = stmt
         .query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
         })?
         .collect::<std::result::Result<_, _>>()?;
 
     let mut findings = Vec::new();
-    for (pattern_id, decision, artifact_path, at_id, _count_at, seq) in rows {
+    for (pattern_id, decision, artifact_path, at_id, _count_at, seq, kind) in rows {
         let templates: Vec<String> = serde_json::from_str(&seq)?;
-        let manual_since = mine::occurrences_since(conn, &templates, at_id)?;
+        // command-based patterns measure recurrence as sequence repeats;
+        // intent/prompt patterns aren't commands, so measure how often the ask
+        // itself recurred since the decision
+        let manual_since = if kind == "intent" || kind == "prompt" {
+            let ask = templates[0].strip_prefix("ask: ").unwrap_or(&templates[0]);
+            mine::ask_recurrence_since(conn, ask, at_id)?
+        } else {
+            mine::occurrences_since(conn, &templates, at_id)?
+        };
         match decision.as_str() {
             "accepted" => {
                 let Some(path) = &artifact_path else { continue };
