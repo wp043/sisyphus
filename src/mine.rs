@@ -39,6 +39,51 @@ pub struct Pattern {
     pub score: f64,
 }
 
+/// Detect transcript overlap and record it. Agent tools re-log a continued
+/// conversation into a fresh session file that replays all prior events, so a
+/// continuation file's event stream is a prefix of (or identical to) the more
+/// complete file. Any session whose full event fingerprint is a prefix of
+/// another's is marked superseded, so mining counts each real event once.
+/// Returns how many sessions were collapsed.
+pub fn dedupe_sessions(conn: &Connection) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT session_key, COALESCE(template, raw) FROM commands
+         WHERE session_key IS NOT NULL AND session_key != ''
+         ORDER BY session_key, seq",
+    )?;
+    let mut by_session: HashMap<String, Vec<String>> = HashMap::new();
+    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+        let (k, ev) = row?;
+        by_session.entry(k).or_default().push(ev);
+    }
+
+    // longest first (ties by key) so a replayed prefix is always compared
+    // against the more complete session that supersedes it
+    let mut sessions: Vec<(String, Vec<String>)> = by_session.into_iter().collect();
+    sessions.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+
+    let mut kept: Vec<&[String]> = Vec::new();
+    let mut superseded: Vec<&str> = Vec::new();
+    for (key, fp) in &sessions {
+        // require a non-trivial stream to avoid dropping a short standalone
+        // session that coincidentally starts like a longer unrelated one
+        let is_replay =
+            fp.len() >= 3 && kept.iter().any(|k| k.len() >= fp.len() && k[..fp.len()] == fp[..]);
+        if is_replay {
+            superseded.push(key);
+        } else {
+            kept.push(fp.as_slice());
+        }
+    }
+
+    conn.execute("DELETE FROM superseded", [])?;
+    let mut ins = conn.prepare("INSERT OR IGNORE INTO superseded (session_key) VALUES (?1)")?;
+    for k in &superseded {
+        ins.execute([k])?;
+    }
+    Ok(superseded.len())
+}
+
 /// Ordered streams of (template, command row id): one per agent session, plus
 /// the whole zsh history as a single stream (it has no session boundaries
 /// without EXTENDED_HISTORY timestamps).
@@ -46,6 +91,7 @@ fn load_streams(conn: &Connection) -> Result<Vec<Vec<(String, i64)>>> {
     let mut stmt = conn.prepare(
         "SELECT source, COALESCE(session_key, ''), template, id FROM commands
          WHERE template IS NOT NULL AND source IN ('zsh','claude','codex')
+           AND COALESCE(session_key, '') NOT IN (SELECT session_key FROM superseded)
          ORDER BY source, session_key, seq",
     )?;
     let mut streams: Vec<Vec<(String, i64)>> = Vec::new();
@@ -210,6 +256,7 @@ pub fn fix_loops(conn: &Connection) -> Result<Vec<Pattern>> {
             SELECT template, COUNT(*) runs, SUM(COALESCE(failed, 0)) fails
             FROM commands
             WHERE source IN ('claude', 'codex', 'zsh') AND template IS NOT NULL
+              AND COALESCE(session_key, '') NOT IN (SELECT session_key FROM superseded)
             -- zsh has no sessions; day-bucket it (only hook rows carry ts +
             -- exit codes, so plain history can't produce false fails)
             GROUP BY source, COALESCE(session_key, date(ts, 'unixepoch')), template
@@ -273,7 +320,8 @@ fn is_directive(raw: &str) -> bool {
 fn load_prompts(conn: &Connection) -> Result<Vec<PromptRow>> {
     let mut stmt = conn.prepare(
         "SELECT source, COALESCE(session_key, ''), seq, raw FROM commands
-         WHERE source LIKE '%_prompt' AND LENGTH(raw) BETWEEN 12 AND 300",
+         WHERE source LIKE '%_prompt' AND LENGTH(raw) BETWEEN 12 AND 300
+           AND COALESCE(session_key, '') NOT IN (SELECT session_key FROM superseded)",
     )?;
     let rows: Vec<PromptRow> = stmt
         .query_map([], |r| {
@@ -493,7 +541,8 @@ mod tests {
              CREATE TABLE patterns (id INTEGER PRIMARY KEY, kind TEXT, template_seq TEXT UNIQUE,
              count INTEGER, score REAL, first_ts INTEGER, last_ts INTEGER);
              CREATE TABLE decisions (pattern_id INTEGER PRIMARY KEY, decision TEXT,
-             artifact_path TEXT, ts INTEGER);",
+             artifact_path TEXT, ts INTEGER);
+             CREATE TABLE superseded (session_key TEXT PRIMARY KEY);",
         )
         .unwrap();
         for (src, tpl, seq) in cmds {
@@ -600,6 +649,35 @@ mod tests {
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].count, 3);
         assert!(clusters[0].templates[0].contains("summarize"));
+    }
+
+    #[test]
+    fn dedupes_replayed_sessions() {
+        let conn = conn_with(&[]);
+        let insert = |sess: &str, seq: i64, tpl: &str| {
+            conn.execute(
+                "INSERT INTO commands (source, raw, template, session_key, seq) VALUES ('codex', ?1, ?1, ?2, ?3)",
+                params![tpl, sess, seq],
+            )
+            .unwrap();
+        };
+        // session B replays A's three commands then adds one more (a continuation)
+        for (i, t) in ["npm ci", "npm run build", "npm test"].iter().enumerate() {
+            insert("A", i as i64, t);
+        }
+        for (i, t) in ["npm ci", "npm run build", "npm test", "npm run deploy"].iter().enumerate() {
+            insert("B", i as i64, t);
+        }
+        let collapsed = dedupe_sessions(&conn).unwrap();
+        assert_eq!(collapsed, 1); // A is a prefix of B → superseded
+        let gone: bool = conn
+            .query_row("SELECT 1 FROM superseded WHERE session_key='A'", [], |_| Ok(true))
+            .unwrap_or(false);
+        assert!(gone);
+        // the replayed sequence must now be counted once, not twice
+        let seqs = mine(&conn).unwrap();
+        let build = seqs.iter().find(|p| p.templates.iter().any(|t| t == "npm run build"));
+        assert!(build.is_none() || build.unwrap().count == 1);
     }
 
     #[test]

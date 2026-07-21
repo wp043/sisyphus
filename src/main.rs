@@ -118,6 +118,10 @@ fn main() -> Result<()> {
             let (codex_new, codex_prompts) = collect::codex::ingest(&conn)?;
             let gemini_prompts = collect::gemini::ingest(&conn)?;
             let templated = normalize::run(&conn)?;
+            let collapsed = mine::dedupe_sessions(&conn)?;
+            if collapsed > 0 {
+                println!("collapsed {collapsed} overlapping (replayed) session file(s)");
+            }
             println!(
                 "ingested: {zsh_new} zsh, {claude_new} claude, {codex_new} codex commands; \
                  {} prompts ({templated} templated)",

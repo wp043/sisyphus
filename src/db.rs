@@ -77,6 +77,12 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             pattern_id INTEGER PRIMARY KEY REFERENCES patterns(id),
             ts         INTEGER NOT NULL
         );
+
+        -- session files whose event stream is a replayed prefix of a more
+        -- complete session (transcript overlap); mining skips these
+        CREATE TABLE IF NOT EXISTS superseded (
+            session_key TEXT PRIMARY KEY
+        );
         "#,
     )?;
     // migrations for DBs created before these columns existed
