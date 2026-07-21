@@ -346,7 +346,10 @@ fn report_auto(conn: &rusqlite::Connection, limit: usize, project: Option<&str>)
                     Ok(path) => {
                         decide(conn, c.id, "accepted", Some(path.display().to_string()))?;
                         ok += 1;
-                        println!("✓ {} ({}) — {}\n    → {}", d.name, d.kind, d.summary, path.display());
+                        let committed = draft::commit_if_enabled(&path, &d.name, &d.kind)?
+                            .map(|s| format!(" ({s})"))
+                            .unwrap_or_default();
+                        println!("✓ {} ({}) — {}\n    → {}{committed}", d.name, d.kind, d.summary, path.display());
                     }
                     Err(e) => {
                         failed += 1;
@@ -435,6 +438,9 @@ fn review_draft(conn: &rusqlite::Connection, c: &mine::Candidate) -> Result<()> 
                     Ok(path) => {
                         decide(conn, id, "accepted", Some(path.display().to_string()))?;
                         println!("  ✓ installed: {}", path.display());
+                        if let Some(s) = draft::commit_if_enabled(&path, &d.name, &d.kind)? {
+                            println!("  ✓ {s}");
+                        }
                         if d.kind == "alias" {
                             println!("  add to ~/.zshrc once: source ~/.config/sisyphus/aliases.zsh");
                         }

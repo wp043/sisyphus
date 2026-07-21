@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Deserialize)]
@@ -218,6 +218,36 @@ Diagnose the most likely mismatch (wrong arguments? too rigid? name hard to reme
         bail!("unknown revision action: {}", rev.action);
     }
     Ok(rev)
+}
+
+/// When `[skills] commit = true` in the config, commit a freshly installed
+/// artifact to whatever git repo contains it (e.g. a dotfiles repo that tracks
+/// ~/.claude/skills). Returns a short summary when a commit was actually made.
+pub fn commit_if_enabled(path: &Path, name: &str, kind: &str) -> Result<Option<String>> {
+    let enabled = std::fs::read_to_string(crate::theme::config_path())
+        .ok()
+        .and_then(|t| t.parse::<toml::Table>().ok())
+        .and_then(|v| v.get("skills")?.get("commit")?.as_bool())
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let git = |args: &[&str]| Command::new("git").args(args).output();
+
+    let top = git(&["-C", &dir.to_string_lossy(), "rev-parse", "--show-toplevel"])?;
+    if !top.status.success() {
+        return Ok(None); // artifact isn't inside a git repo
+    }
+    let root = String::from_utf8_lossy(&top.stdout).trim().to_string();
+    let scope = if kind == "skill" { "skills" } else { "bin" };
+    let msg = format!("feat({scope}): add {name} (via sisyphus)");
+    git(&["-C", &root, "add", &path.to_string_lossy()])?;
+    let commit = git(&["-C", &root, "commit", "-m", &msg])?;
+    Ok(commit
+        .status
+        .success()
+        .then(|| format!("committed to {}", Path::new(&root).file_name().unwrap_or_default().to_string_lossy())))
 }
 
 /// Write the artifact to its real destination and return the path.

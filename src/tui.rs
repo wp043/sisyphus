@@ -90,7 +90,10 @@ fn event_loop(
                 Ok(d) if auto_accept => match draft::install(&d) {
                     Ok(p) => {
                         db::decide(conn, items[idx].cand.id, "accepted", Some(p.display().to_string()))?;
-                        State::Done(format!("✓ {} installed → {}", d.name, p.display()))
+                        let c = draft::commit_if_enabled(&p, &d.name, &d.kind)?
+                            .map(|s| format!(" ({s})"))
+                            .unwrap_or_default();
+                        State::Done(format!("✓ {} installed{c}", d.name))
                     }
                     Err(e) => State::Failed(format!("install failed: {e:#}")),
                 },
@@ -137,7 +140,10 @@ fn event_loop(
                     match draft::install(&d) {
                         Ok(p) => {
                             db::decide(conn, items[selected].cand.id, "accepted", Some(p.display().to_string()))?;
-                            State::Done(format!("✓ {} installed → {}", d.name, p.display()))
+                            let c = draft::commit_if_enabled(&p, &d.name, &d.kind)?
+                                .map(|s| format!(" ({s})"))
+                                .unwrap_or_default();
+                            State::Done(format!("✓ {} installed{c}", d.name))
                         }
                         Err(e) => State::Failed(format!("install failed: {e:#}")),
                     }

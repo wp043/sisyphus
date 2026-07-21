@@ -389,6 +389,11 @@ prompt  = "#9e8cb2"      # dusty lavender
 
 [draft]
 prefer = "skill"         # "auto" (detect), "skill", or "script"
+
+[skills]
+commit = true            # after accepting an artifact, git-commit it to the
+                         # repo that contains it (e.g. a dotfiles repo tracking
+                         # ~/.claude/skills), with a conventional message
 ```
 
 The dashboard (`sisyphus serve`) uses the same palette: stat tiles, a
