@@ -48,6 +48,7 @@ fn template_seconds(conn: &Connection) -> Result<(HashMap<String, f64>, f64)> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(session_key, ''), template, ts, duration_ms FROM commands
          WHERE template IS NOT NULL
+           AND COALESCE(session_key, '') NOT IN (SELECT session_key FROM superseded)
          ORDER BY source, session_key, seq",
     )?;
     let rows: Vec<(String, String, Option<i64>, Option<i64>)> = stmt

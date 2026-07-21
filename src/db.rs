@@ -97,6 +97,13 @@ fn migrate(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE decisions ADD COLUMN count_at_decision INTEGER", []);
     // first ~300 chars of failure output, for fix-loop draft context
     let _ = conn.execute("ALTER TABLE commands ADD COLUMN error_snippet TEXT", []);
+    // undo an earlier bug that templated prompt/skill text (only shell-command
+    // sources should carry a template); idempotent after the first run
+    let _ = conn.execute(
+        "UPDATE commands SET template = NULL
+         WHERE template IS NOT NULL AND source NOT IN ('zsh','claude','codex')",
+        [],
+    );
 }
 
 /// How often an accepted artifact has been used since `since_id`: scripts and

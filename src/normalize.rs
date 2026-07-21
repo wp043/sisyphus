@@ -54,8 +54,10 @@ fn normalize_token(tok: &str, index: usize) -> String {
 
 /// Fill the template column for any rows that don't have one yet.
 pub fn run(conn: &Connection) -> Result<usize> {
+    // only shell-command sources get templated; prompt and skill text must not
+    // (it would pollute timing medians, stats, and session fingerprints)
     let mut stmt = conn.prepare(
-        "SELECT id, raw FROM commands WHERE template IS NULL AND source != 'claude_prompt'",
+        "SELECT id, raw FROM commands WHERE template IS NULL AND source IN ('zsh','claude','codex')",
     )?;
     let rows: Vec<(i64, String)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?

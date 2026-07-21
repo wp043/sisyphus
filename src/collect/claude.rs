@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 
 /// Parse "2026-07-15T15:03:44.818Z" to unix seconds without pulling in chrono.
 pub fn parse_iso(ts: &str) -> Option<i64> {
-    let b = ts.as_bytes();
-    if b.len() < 19 {
+    // fixed-offset byte slicing below assumes ASCII; bail on anything else so a
+    // malformed multibyte timestamp returns None instead of panicking
+    if ts.len() < 19 || !ts.is_ascii() {
         return None;
     }
     let num = |s: &str| s.parse::<i64>().ok();

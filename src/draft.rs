@@ -148,8 +148,11 @@ fn parse_draft(text: &str) -> Result<Draft> {
     // tolerate markdown fences or prose around the JSON object
     let start = text.find('{').context("no JSON in claude output")?;
     let end = text.rfind('}').context("no JSON in claude output")?;
+    if end < start {
+        bail!("no JSON object in claude output");
+    }
     let draft: Draft = serde_json::from_str(&text[start..=end])
-        .with_context(|| format!("unparseable draft: {}", &text[..text.len().min(200)]))?;
+        .with_context(|| format!("unparseable draft: {}", text.chars().take(200).collect::<String>()))?;
     if !matches!(draft.kind.as_str(), "script" | "alias" | "skill") {
         bail!("unknown draft kind: {}", draft.kind);
     }
@@ -272,6 +275,15 @@ mod tests {
     fn parses_fenced_json() {
         let d = parse_draft("```json\n{\"name\":\"git-init-push\",\"kind\":\"script\",\"summary\":\"s\",\"content\":\"c\"}\n```").unwrap();
         assert_eq!(d.name, "git-init-push");
+    }
+
+    #[test]
+    fn malformed_output_errors_without_panicking() {
+        // '}' before '{' must not panic on the reversed slice range
+        assert!(parse_draft("} then {").is_err());
+        // braces present but invalid JSON with multibyte >200 bytes: the error
+        // context must not slice mid-char (chars().take, not byte index)
+        assert!(parse_draft(&format!("{{ {} }}", "中".repeat(150))).is_err());
     }
 
     #[test]
