@@ -18,7 +18,7 @@ mod tui;
 use std::io::{IsTerminal, Write};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "sisyphus", about = "Finds the boulders you keep pushing", version)]
@@ -62,6 +62,8 @@ enum Cmd {
         /// Pattern id as shown by `report`
         id: i64,
     },
+    /// A glanceable summary: friction by repo, top boulders, adoption
+    Digest,
     /// Show whether accepted automations are actually being used
     Gain,
     /// Act on adoption feedback: revise unused artifacts, resurface ignored
@@ -79,6 +81,10 @@ enum Cmd {
     },
     /// Check that everything sisyphus relies on is set up
     Doctor,
+    /// Print a shell completion script (e.g. `sisyphus completions zsh`)
+    Completions {
+        shell: clap_complete::Shell,
+    },
     /// Print the shell hook that logs timestamps/durations/exit codes.
     /// Install with: eval "$(sisyphus hook zsh)" in ~/.zshrc
     Hook {
@@ -161,10 +167,14 @@ fn main() -> Result<()> {
             let d = draft::draft_pattern(&conn, &kind, &templates, count as usize)?;
             println!("── {} ({}) — {}\n{}", d.name, d.kind, d.summary, d.content);
         }
+        Cmd::Digest => digest(&conn)?,
         Cmd::Gain => gain(&conn)?,
         Cmd::Evolve => evolve(&conn)?,
         Cmd::Serve { port, no_open } => serve::run(port, !no_open)?,
         Cmd::Doctor => doctor::run(&conn)?,
+        Cmd::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "sisyphus", &mut std::io::stdout());
+        }
         Cmd::Hook { shell } => match shell.as_str() {
             "zsh" => println!("{}", collect::hook::zsh_snippet()),
             other => anyhow::bail!("unsupported shell {other:?} — only zsh for now"),
@@ -180,6 +190,74 @@ fn main() -> Result<()> {
         }
         Cmd::Scan => scan(&conn)?,
         Cmd::Watch { install, uninstall } => watch(install, uninstall)?,
+    }
+    Ok(())
+}
+
+fn kind_icon(kind: &str) -> &'static str {
+    match kind {
+        "sequence" => "⚡",
+        "fixloop" => "🔁",
+        "failure" => "🩹",
+        "intent" => "💡",
+        "prompt" => "💬",
+        _ => "•",
+    }
+}
+
+/// One-glance morning summary: how much manual friction is mineable, where it
+/// lives, the biggest boulders, and whether past automations are sticking.
+fn digest(conn: &rusqlite::Connection) -> Result<()> {
+    let live = "COALESCE(session_key,'') NOT IN (SELECT session_key FROM superseded)";
+    let count = |sql: String| -> Result<i64> { Ok(conn.query_row(&sql, [], |r| r.get(0))?) };
+    let cmds = count(format!("SELECT COUNT(*) FROM commands WHERE source NOT LIKE '%_prompt' AND {live}"))?;
+    let prompts = count(format!("SELECT COUNT(*) FROM commands WHERE source LIKE '%_prompt' AND {live}"))?;
+
+    let cands = mine::candidates(conn, 50, None, false)?;
+    let repos: std::collections::HashSet<&str> =
+        cands.iter().filter_map(|c| c.project.as_deref()).collect();
+    println!(
+        "\n  {cmds} commands · {prompts} prompts mined · {} undecided patterns across {} repo(s)\n",
+        cands.len(),
+        repos.len()
+    );
+
+    // friction by project (total estimated minutes + pattern count)
+    let mut by_proj: std::collections::HashMap<String, (f64, usize)> = std::collections::HashMap::new();
+    for c in &cands {
+        let key = c.project.clone().unwrap_or_else(|| "(unattributed)".into());
+        let e = by_proj.entry(key).or_default();
+        e.0 += c.score;
+        e.1 += 1;
+    }
+    if !by_proj.is_empty() {
+        println!("  friction by repo:");
+        let mut rows: Vec<_> = by_proj.into_iter().collect();
+        rows.sort_by(|a, b| b.1.0.total_cmp(&a.1.0));
+        for (proj, (secs, n)) in rows.iter().take(6) {
+            println!("    {proj:<20} ~{:>3.0} min · {n} pattern(s)", secs / 60.0);
+        }
+        println!();
+    }
+
+    if !cands.is_empty() {
+        println!("  top boulders:");
+        for c in cands.iter().take(5) {
+            let step = c.templates.first().map(String::as_str).unwrap_or("");
+            let step: String = step.chars().take(52).collect();
+            println!("    {:>6}  {} {step}", c.cost_label().replace("by hand", "").trim(), kind_icon(&c.kind));
+        }
+        println!();
+    }
+
+    let accepted = count("SELECT COUNT(*) FROM decisions WHERE decision = 'accepted'".into())?;
+    let not_sticking = evolve_findings(conn)?
+        .iter()
+        .filter(|f| matches!(f.kind, FindingKind::NotAdopted))
+        .count();
+    println!("  adoption: {accepted} accepted · {not_sticking} not sticking");
+    if !cands.is_empty() {
+        println!("  → run `sisyphus report` to draft the top ones");
     }
     Ok(())
 }

@@ -168,7 +168,9 @@ misjudge an adopted skill as unused. Force the behaviour with
 | `sisyphus report --project <name>` | Only patterns from repos whose name contains the substring. |
 | `sisyphus report --json` | Emit mined patterns as JSON instead of drafting. |
 | `sisyphus report --semantic` | Cluster prompts by meaning via one `claude` call (opt-in). |
+| `sisyphus digest` | Glanceable summary: friction by repo, top boulders, adoption. |
 | `sisyphus gain` | Adoption + skill-impact: does the agent do less after a skill? |
+| `sisyphus completions <shell>` | Print a shell completion script (zsh/bash/fish/…). |
 | `sisyphus draft <id>` | Draft one pattern non-interactively and print it (no install). |
 | `sisyphus gain` | Report whether accepted automations are actually being used. |
 | `sisyphus evolve` | Act on adoption feedback: revise unused artifacts, resurface ignored patterns. |
