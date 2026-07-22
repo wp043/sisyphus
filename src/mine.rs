@@ -11,7 +11,14 @@ const MIN_COUNT: usize = 3;
 /// entirely of these is navigation noise, not a workflow.
 fn is_noise(tpl: &str) -> bool {
     let head = tpl.split_whitespace().next().unwrap_or("");
-    matches!(head, "ls" | "ll" | "la" | "pwd" | "clear" | "exit" | "history" | "cd" | "source" | "which" | "echo" | "cat" if !tpl.contains("&&"))
+    // navigation/inspection that carries no automation signal, plus interactive
+    // launchers (editors, agents, pagers) that are a destination, not a step
+    matches!(head,
+        "ls" | "ll" | "la" | "pwd" | "clear" | "exit" | "history" | "cd" | "source"
+        | "which" | "echo" | "cat"
+        | "claude" | "codex" | "cursor" | "code" | "vim" | "nvim" | "vi" | "nano"
+        | "emacs" | "man" | "top" | "htop" | "tig" | "lazygit" | "yazi"
+        if !tpl.contains("&&"))
         || matches!(tpl, "git status" | "git diff" | "git log")
 }
 
@@ -297,6 +304,94 @@ pub fn mine(conn: &Connection) -> Result<Vec<Pattern>> {
         .collect();
     patterns.sort_by(|a, b| b.score.total_cmp(&a.score));
     Ok(patterns)
+}
+
+/// Reduce a raw error snippet to a stable signature so different commands that
+/// fail the same way cluster together. Returns None for unrecognized output so
+/// only real, recognizable errors are grouped (no junk clusters).
+pub fn error_signature(snippet: &str) -> Option<String> {
+    let s = snippet.to_lowercase();
+    let hit = |needle: &str| s.contains(needle);
+    let sig = if hit("regex parse error") {
+        "ripgrep: regex parse error (unescaped metacharacter)"
+    } else if hit("eresolve") {
+        "npm: ERESOLVE dependency conflict"
+    } else if hit("executable doesn't exist") || hit("please run the following command to download new browsers") {
+        "playwright: browser not installed"
+    } else if hit("traceback (most recent call last)") {
+        "python: traceback / uncaught exception"
+    } else if hit("cannot find module") || hit("module not found") || hit("modulenotfounderror") {
+        "module not found"
+    } else if hit("command not found") {
+        "shell: command not found"
+    } else if hit("fatal: not a git repository") {
+        "git: not a repository"
+    } else if hit("permission denied") {
+        "permission denied"
+    } else if hit("address already in use") || hit("eaddrinuse") {
+        "port already in use"
+    } else if let Some(code) = rust_or_ts_code(&s) {
+        return Some(code);
+    } else {
+        return None;
+    };
+    Some(sig.to_string())
+}
+
+/// Extract a rust (error[E0502]) or typescript (error TS2345) diagnostic code.
+fn rust_or_ts_code(s: &str) -> Option<String> {
+    if let Some(i) = s.find("error[e") {
+        let code: String = s[i + 6..].chars().take_while(|c| c.is_alphanumeric()).collect();
+        if code.len() >= 2 {
+            return Some(format!("rust: error[{}]", code.to_uppercase()));
+        }
+    }
+    if let Some(i) = s.find("error ts") {
+        let code: String = s[i + 6..].chars().skip_while(|c| !c.is_numeric()).take_while(|c| c.is_numeric()).collect();
+        if !code.is_empty() {
+            return Some(format!("typescript: TS{code}"));
+        }
+    }
+    None
+}
+
+/// The same error hit across *different* commands — the signal fix-loop mining
+/// (same command re-run) misses. Groups failures by signature; a signature that
+/// recurs is a habit worth a corrective skill ("you keep hitting X → do Y").
+pub fn failures(conn: &Connection) -> Result<Vec<Pattern>> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(template, raw), error_snippet FROM commands
+         WHERE failed = 1 AND error_snippet IS NOT NULL
+           AND COALESCE(session_key, '') NOT IN (SELECT session_key FROM superseded)",
+    )?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+
+    // signature -> (count, distinct example commands)
+    let mut groups: HashMap<String, (usize, Vec<String>)> = HashMap::new();
+    for (cmd, snippet) in rows {
+        let Some(sig) = error_signature(&snippet) else { continue };
+        let e = groups.entry(sig).or_default();
+        e.0 += 1;
+        if !e.1.contains(&cmd) && e.1.len() < 3 {
+            e.1.push(cmd);
+        }
+    }
+
+    let mut out: Vec<Pattern> = groups
+        .into_iter()
+        .filter(|(_, (n, _))| *n >= 3)
+        .map(|(sig, (count, examples))| {
+            let mut templates = vec![sig];
+            templates.extend(examples);
+            // each recurring failure ~ a minute of lost time on average
+            let score = count as f64 * 60.0;
+            Pattern { templates, count, score }
+        })
+        .collect();
+    out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    Ok(out)
 }
 
 /// A repeated same-command retry cycle inside agent sessions: the command was
@@ -721,6 +816,7 @@ pub fn candidates(
     for (kind, patterns) in [
         ("sequence", mine(conn)?),
         ("fixloop", fix_loops(conn)?),
+        ("failure", failures(conn)?),
         ("intent", intent_patterns),
         ("prompt", prompt_patterns),
     ] {
@@ -778,7 +874,7 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE commands (id INTEGER PRIMARY KEY, source TEXT, raw TEXT, template TEXT,
              head TEXT, ts INTEGER, duration_ms INTEGER, cwd TEXT, project TEXT,
-             session_key TEXT, seq INTEGER, failed INTEGER);
+             session_key TEXT, seq INTEGER, failed INTEGER, error_snippet TEXT);
              CREATE TABLE patterns (id INTEGER PRIMARY KEY, kind TEXT, template_seq TEXT UNIQUE,
              count INTEGER, score REAL, first_ts INTEGER, last_ts INTEGER);
              CREATE TABLE decisions (pattern_id INTEGER PRIMARY KEY, decision TEXT,
@@ -852,6 +948,38 @@ mod tests {
             seq += 1;
         }
         assert_eq!(occurrences_since(&conn, &tpls, boundary).unwrap(), 2);
+    }
+
+    #[test]
+    fn signatures_recognize_common_errors() {
+        assert_eq!(
+            error_signature("Exit code 2 rg: regex parse error: unclosed group"),
+            Some("ripgrep: regex parse error (unescaped metacharacter)".into())
+        );
+        assert_eq!(error_signature("error[E0502]: cannot borrow"), Some("rust: error[E0502]".into()));
+        assert!(error_signature("everything is fine, exit 0").is_none());
+    }
+
+    #[test]
+    fn failures_cluster_by_signature() {
+        let conn = conn_with(&[]);
+        let add = |seq: i64, cmd: &str, snip: &str| {
+            conn.execute(
+                "INSERT INTO commands (source, raw, template, session_key, seq, failed, error_snippet)
+                 VALUES ('claude', ?1, ?1, 's', ?2, 1, ?3)",
+                params![cmd, seq, snip],
+            )
+            .unwrap();
+        };
+        // three different commands, same ripgrep regex error
+        add(0, "rg foo(", "rg: regex parse error near '('");
+        add(1, "rg bar|", "rg: regex parse error: unclosed");
+        add(2, "grep -r x|y", "rg: regex parse error quantifier");
+        add(3, "npm ci", "some unrelated one-off failure");
+        let f = failures(&conn).unwrap();
+        assert_eq!(f.len(), 1);
+        assert!(f[0].templates[0].starts_with("ripgrep"));
+        assert_eq!(f[0].count, 3);
     }
 
     #[test]

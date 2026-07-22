@@ -47,6 +47,10 @@ fn build_prompt(kind: &str, templates: &[String], count: usize, examples: &str) 
             "The developer has typed essentially this same request to AI coding tools {count} separate times:\n\n\"{}\"\n\nDraft a Claude Code skill (kind \"skill\") that captures this recurring intent so it becomes a one-word command. SKILL.md format with `name:` and `description:` frontmatter.",
             templates.join("\n")
         ),
+        "failure" => format!(
+            "Draft a Claude Code skill (kind \"skill\") that helps the developer avoid or quickly fix a recurring error (details below). The skill's description must state WHEN to auto-trigger (e.g. before running the kind of command that causes it), and its body should give the concrete prevention/fix — for example, for a ripgrep regex parse error, use `rg -F` for literal search or escape metacharacters. Signature: {}",
+            templates.first().map(String::as_str).unwrap_or("")
+        ),
         _ => format!(
             "The developer has manually repeated this command sequence {count} times (mined from their real shell/agent history):\n\n{}",
             templates.join("\n")
@@ -103,6 +107,28 @@ fn agent_native(conn: &Connection) -> bool {
 }
 
 pub fn prepare_prompt(conn: &Connection, kind: &str, templates: &[String], count: usize) -> Result<String> {
+    // failure patterns key on an error signature (templates[0]), not a command;
+    // gather real error snippets that match it for the draft
+    if kind == "failure" {
+        let mut stmt = conn.prepare(
+            "SELECT error_snippet FROM commands WHERE failed = 1 AND error_snippet IS NOT NULL",
+        )?;
+        let snippets: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .filter_map(|s| s.ok())
+            .filter(|s| crate::mine::error_signature(s).as_deref() == Some(&templates[0]))
+            .take(3)
+            .collect();
+        let cmds = templates[1..].join("\n");
+        let mut ex = format!(
+            "The developer keeps hitting this error, {count} times across different commands:\n\n\"{}\"\n\nExample commands that triggered it:\n{cmds}\n",
+            templates[0]
+        );
+        for s in &snippets {
+            ex.push_str(&format!("---\n{}\n", s.chars().take(300).collect::<String>()));
+        }
+        return Ok(build_prompt(kind, templates, count, &ex));
+    }
     let mut ex = if kind == "prompt" { String::new() } else { examples(conn, templates)? };
     if agent_native(conn) {
         ex.push_str(

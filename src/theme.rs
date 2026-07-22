@@ -13,6 +13,7 @@ pub struct Theme {
     pub highlight_bg: Color,
     pub seq: Color,
     pub fixloop: Color,
+    pub failure: Color,
     pub intent: Color,
     pub prompt: Color,
 }
@@ -29,6 +30,7 @@ impl Theme {
             highlight_bg: Color::Rgb(44, 47, 58),   // charcoal
             seq: Color::Rgb(122, 140, 178),         // slate
             fixloop: Color::Rgb(200, 172, 122),     // sand
+            failure: Color::Rgb(186, 122, 122),     // dusty rose
             intent: Color::Rgb(122, 168, 160),      // muted teal
             prompt: Color::Rgb(158, 140, 178),      // dusty lavender
         }
@@ -46,6 +48,7 @@ impl Theme {
             highlight_bg: Color::DarkGray,
             seq: Color::Blue,
             fixloop: Color::Yellow,
+            failure: Color::Red,
             intent: Color::Cyan,
             prompt: Color::Magenta,
         }
@@ -55,6 +58,7 @@ impl Theme {
         match kind {
             "sequence" => self.seq,
             "fixloop" => self.fixloop,
+            "failure" => self.failure,
             "intent" => self.intent,
             "prompt" => self.prompt,
             _ => self.text,
@@ -81,6 +85,7 @@ struct ColorOverrides {
     highlight_bg: Option<String>,
     seq: Option<String>,
     fixloop: Option<String>,
+    failure: Option<String>,
     intent: Option<String>,
     prompt: Option<String>,
 }
@@ -127,6 +132,7 @@ pub fn load() -> Theme {
         (&mut theme.highlight_bg, &o.highlight_bg),
         (&mut theme.seq, &o.seq),
         (&mut theme.fixloop, &o.fixloop),
+        (&mut theme.failure, &o.failure),
         (&mut theme.intent, &o.intent),
         (&mut theme.prompt, &o.prompt),
     ] {

@@ -33,6 +33,7 @@ fn kind_icon(kind: &str) -> &'static str {
     match kind {
         "sequence" => "⚡",
         "fixloop" => "🔁",
+        "failure" => "🩹",
         "intent" => "💡",
         "prompt" => "💬",
         _ => "•",
