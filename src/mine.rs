@@ -306,6 +306,22 @@ pub fn mine(conn: &Connection) -> Result<Vec<Pattern>> {
     Ok(patterns)
 }
 
+/// A coarse command identity for redundancy comparison: program + subcommand
+/// (`git add`, `npm run`, `cargo check`), skipping noise and placeholders.
+fn cmd_key(tpl: &str) -> Option<String> {
+    if is_noise(tpl) {
+        return None;
+    }
+    let mut it = tpl.split_whitespace();
+    let a = it.next()?;
+    match it.next() {
+        Some(b) if !b.starts_with('<') && !b.starts_with('-') && b != "&&" && b != ">" => {
+            Some(format!("{a} {b}"))
+        }
+        _ => Some(a.to_string()),
+    }
+}
+
 /// Reduce a raw error snippet to a stable signature so different commands that
 /// fail the same way cluster together. Returns None for unrecognized output so
 /// only real, recognizable errors are grouped (no junk clusters).
@@ -821,6 +837,10 @@ pub fn candidates(
         ("prompt", prompt_patterns),
     ] {
         let mut kept = 0;
+        // command-key sets of already-surfaced sequence patterns, so a shorter
+        // fragment whose commands are mostly a subset of a bigger, higher-value
+        // workflow (git status→add vs git add→commit→push) is dropped as noise
+        let mut shown_keysets: Vec<std::collections::HashSet<String>> = Vec::new();
         for p in patterns {
             let key = serde_json::to_string(&p.templates)?;
             conn.execute(
@@ -849,6 +869,22 @@ pub fn candidates(
                     .is_some_and(|p| p.to_lowercase().contains(&want.to_lowercase()));
                 if !matches {
                     continue;
+                }
+            }
+            // redundancy dedup for command sequences: skip if this pattern's
+            // non-noise commands are mostly contained in one already shown
+            if kind == "sequence" {
+                let keys: std::collections::HashSet<String> =
+                    p.templates.iter().filter_map(|t| cmd_key(t)).collect();
+                if !keys.is_empty() {
+                    let redundant = shown_keysets.iter().any(|shown| {
+                        let overlap = keys.intersection(shown).count();
+                        overlap * 2 >= keys.len() // ≥50% of my commands already covered
+                    });
+                    if redundant {
+                        continue;
+                    }
+                    shown_keysets.push(keys);
                 }
             }
             kept += 1;
