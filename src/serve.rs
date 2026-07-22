@@ -51,31 +51,33 @@ fn data() -> Result<String> {
     // per-request connection: rusqlite connections aren't Sync and requests are rare
     let conn = db::open()?;
     let count = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get(0))?) };
+    // replayed continuation files are excluded everywhere, so dashboard numbers
+    // match what mining actually sees
+    const LIVE: &str = " COALESCE(session_key,'') NOT IN (SELECT session_key FROM superseded)";
 
     let sources: Vec<_> = {
-        let mut stmt = conn.prepare(
-            "SELECT source, COUNT(*) FROM commands GROUP BY source ORDER BY 2 DESC",
-        )?;
-        
+        let mut stmt = conn.prepare(&format!(
+            "SELECT source, COUNT(*) FROM commands WHERE {LIVE} GROUP BY source ORDER BY 2 DESC"
+        ))?;
         stmt
             .query_map([], |r| Ok(json!({"name": r.get::<_, String>(0)?, "n": r.get::<_, i64>(1)?})))?
             .collect::<std::result::Result<_, _>>()?
     };
 
     let daily: Vec<_> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT date(ts, 'unixepoch') d, COUNT(*) FROM commands
-             WHERE ts IS NOT NULL GROUP BY d ORDER BY d",
-        )?;
+             WHERE ts IS NOT NULL AND {LIVE} GROUP BY d ORDER BY d"
+        ))?;
         stmt.query_map([], |r| Ok(json!({"d": r.get::<_, String>(0)?, "n": r.get::<_, i64>(1)?})))?
             .collect::<std::result::Result<_, _>>()?
     };
 
     let top_templates: Vec<_> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT template, COUNT(*) c FROM commands
-             WHERE template IS NOT NULL GROUP BY template ORDER BY c DESC LIMIT 12",
-        )?;
+             WHERE template IS NOT NULL AND {LIVE} GROUP BY template ORDER BY c DESC LIMIT 12"
+        ))?;
         stmt.query_map([], |r| Ok(json!({"tpl": r.get::<_, String>(0)?, "n": r.get::<_, i64>(1)?})))?
             .collect::<std::result::Result<_, _>>()?
     };
@@ -130,8 +132,8 @@ fn data() -> Result<String> {
 
     let body = json!({
         "totals": {
-            "commands": count("SELECT COUNT(*) FROM commands WHERE source NOT LIKE '%_prompt'")?,
-            "prompts": count("SELECT COUNT(*) FROM commands WHERE source LIKE '%_prompt'")?,
+            "commands": count(&format!("SELECT COUNT(*) FROM commands WHERE source NOT LIKE '%_prompt' AND {LIVE}"))?,
+            "prompts": count(&format!("SELECT COUNT(*) FROM commands WHERE source LIKE '%_prompt' AND {LIVE}"))?,
             "patterns": count("SELECT COUNT(*) FROM patterns")?,
             "accepted": count("SELECT COUNT(*) FROM decisions WHERE decision = 'accepted'")?,
             "steps_saved": gain.iter().map(|g| g["saved"].as_i64().unwrap_or(0)).sum::<i64>(),
