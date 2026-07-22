@@ -1,28 +1,38 @@
-# 🪨 sisyphus
+<p align="center">
+  <img src="assets/logo.png" width="600" alt="sisyphus — finds the boulders you keep pushing" />
+</p>
 
-**Finds the boulders you keep pushing.**
+<p align="center">
+  <strong>Your work history, mined for the things you keep doing by hand — and automated.</strong><br />
+  sisyphus watches your shell and your AI-agent sessions
+  (<a href="https://claude.com/claude-code">Claude Code</a>, <a href="https://github.com/openai/codex">Codex</a>, Gemini),<br />
+  finds the multi-step boulders you keep pushing, and uses Claude to draft the automation.
+</p>
 
-sisyphus watches how you actually work — your shell history and your AI-agent
-sessions (Claude Code, Codex, Gemini) — mines the multi-step things you keep
-doing by hand, and uses Claude to draft the automation for you to accept, edit,
-or ignore. Then it watches whether the automation *stuck*, and revises it if it
-didn't.
+<p align="center">
+  <img src="https://img.shields.io/badge/license-MIT-8ca88a?style=flat-square" alt="MIT license" />
+  <img src="https://img.shields.io/badge/built%20with-Rust-c8ac7a?style=flat-square&logo=rust&logoColor=white" alt="built with Rust" />
+  <img src="https://img.shields.io/badge/tests-33%20passing-8ca88a?style=flat-square" alt="33 tests passing" />
+  <img src="https://img.shields.io/badge/local--first-7a8cb2?style=flat-square" alt="local first" />
+  <img src="https://img.shields.io/badge/drafts%20via-claude-9e8cb2?style=flat-square" alt="drafts via claude" />
+</p>
+
+<p align="center">
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#what-it-finds">What it finds</a> ·
+  <a href="#how-mining-works">How it works</a> ·
+  <a href="#the-feedback-loop">The loop</a> ·
+  <a href="#architecture">Architecture</a>
+</p>
+
+<p align="center">
+  <img src="assets/hero.png" width="820" alt="sisyphus report — repeated workflows, fix-loops, and recurring intents mined from real history" />
+</p>
 
 Everything stays on your machine. History is ingested into a local SQLite
 database; the only network call is a single `claude -p` invocation, and only
-when *you* ask for a draft.
-
-```
-⚡ #1 (pattern 2) — seen 6× · score 12
-     git remote add origin <path>
-   → git branch -M main
-   → git push -u origin main
-
-#1 (6×): [d]raft with claude / [i]gnore forever / [s]kip / [q]uit? d
-── git-publish (script) — connect a repo to a remote and push main in one command
-[a]ccept / [e]dit / [i]gnore forever / [s]kip? a
-  ✓ installed: ~/.local/bin/git-publish
-```
+when *you* ask for a draft. Then sisyphus watches whether each automation
+actually *stuck* — and revises it if it didn't.
 
 ---
 

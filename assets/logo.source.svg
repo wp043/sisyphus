@@ -1,0 +1,10 @@
+<svg width="760" height="180" viewBox="0 0 760 180" xmlns="http://www.w3.org/2000/svg" fill="none">
+  <!-- ground/hill: a solid wedge rising to the right -->
+  <path d="M22 150 L150 150 L150 64 Z" fill="#8ca88a"/>
+  <path d="M22 150 L150 64" stroke="#a6c0a3" stroke-width="6" stroke-linecap="round"/>
+  <!-- boulder resting on the slope -->
+  <circle cx="86" cy="86" r="28" fill="#7a8cb2"/>
+  <circle cx="75" cy="76" r="8.5" fill="#9fb0cf"/>
+  <!-- sun -->
+  <circle cx="180" cy="42" r="13" fill="#c8ac7a"/>
+</svg>
