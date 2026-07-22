@@ -154,9 +154,15 @@ pub fn prepare_prompt(conn: &Connection, kind: &str, templates: &[String], count
     Ok(build_prompt(kind, templates, count, &ex))
 }
 
+/// The claude binary to invoke. `SISYPHUS_CLAUDE_BIN` overrides it — useful for
+/// pointing at a wrapper, and for feeding tests a deterministic mock.
+fn claude_bin() -> String {
+    std::env::var("SISYPHUS_CLAUDE_BIN").unwrap_or_else(|_| "claude".into())
+}
+
 /// One headless claude call → parsed draft. Thread-safe; no DB access.
 pub fn run_claude(prompt: &str) -> Result<Draft> {
-    let out = Command::new("claude")
+    let out = Command::new(claude_bin())
         .args(["-p", prompt])
         .output()
         .context("failed to run `claude` — is Claude Code installed and on PATH?")?;
@@ -172,7 +178,7 @@ pub fn draft_pattern(conn: &Connection, kind: &str, templates: &[String], count:
 
 /// Ask claude to group prompts by shared intent. Returns groups of indices.
 pub fn claude_group(prompt: &str) -> Result<Vec<Vec<usize>>> {
-    let out = Command::new("claude")
+    let out = Command::new(claude_bin())
         .args(["-p", prompt])
         .output()
         .context("failed to run `claude`")?;
@@ -252,7 +258,7 @@ Diagnose the most likely mismatch (wrong arguments? too rigid? name hard to reme
         templates.join("\n"),
         examples(conn, templates)?,
     );
-    let out = Command::new("claude")
+    let out = Command::new(claude_bin())
         .args(["-p", &prompt])
         .output()
         .context("failed to run `claude`")?;
@@ -376,6 +382,35 @@ mod tests {
     #[test]
     fn rejects_path_traversal_names() {
         assert!(parse_draft("{\"name\":\"../evil\",\"kind\":\"script\",\"summary\":\"s\",\"content\":\"c\"}").is_err());
+    }
+
+    // End-to-end coverage of the claude-calling path via a deterministic mock
+    // binary — the boundary that had no tests because it shells out to claude.
+    #[test]
+    fn run_claude_parses_mock_output() {
+        let dir = std::env::temp_dir().join(format!("sis-mock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        // a fake `claude` that ignores its args and prints a fenced draft
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\ncat <<'EOF'\nhere you go:\n```json\n{\"name\":\"pr-triage\",\"kind\":\"skill\",\"summary\":\"triage a PR\",\"content\":\"# PR Triage\\nrun gh pr view\"}\n```\nEOF\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // SISYPHUS_CLAUDE_BIN is only read here; no other test invokes claude
+        unsafe { std::env::set_var("SISYPHUS_CLAUDE_BIN", &bin) };
+        let d = run_claude("draft me something").expect("mock claude should parse");
+        unsafe { std::env::remove_var("SISYPHUS_CLAUDE_BIN") };
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(d.name, "pr-triage");
+        assert_eq!(d.kind, "skill");
+        assert!(d.content.contains("gh pr view"));
     }
 
     #[test]
