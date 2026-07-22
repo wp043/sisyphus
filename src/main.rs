@@ -120,27 +120,13 @@ fn main() -> Result<()> {
     let conn = db::open()?;
     match cli.cmd {
         Cmd::Ingest => {
-            // once the shell hook is logging, its records supersede HISTFILE
-            // (same commands, richer fields) — don't ingest both
-            let hook_new = collect::hook::ingest(&conn)?;
-            let zsh_path = dirs::home_dir().unwrap_or_default().join(".zsh_history");
-            let zsh_new = if !collect::hook::log_path().exists() && zsh_path.exists() {
-                collect::zsh::ingest(&conn, &zsh_path)?
-            } else {
-                hook_new
-            };
-            let (claude_new, claude_prompts) = collect::claude::ingest(&conn)?;
-            let (codex_new, codex_prompts) = collect::codex::ingest(&conn)?;
-            let gemini_prompts = collect::gemini::ingest(&conn)?;
-            let templated = normalize::run(&conn)?;
-            let collapsed = mine::dedupe_sessions(&conn)?;
-            if collapsed > 0 {
-                println!("collapsed {collapsed} overlapping (replayed) session file(s)");
+            let s = ingest_all(&conn)?;
+            if s.collapsed > 0 {
+                println!("collapsed {} overlapping (replayed) session file(s)", s.collapsed);
             }
             println!(
-                "ingested: {zsh_new} zsh, {claude_new} claude, {codex_new} codex commands; \
-                 {} prompts ({templated} templated)",
-                claude_prompts + codex_prompts + gemini_prompts
+                "ingested: {} zsh, {} claude, {} codex commands; {} prompts ({} templated)",
+                s.zsh, s.claude, s.codex, s.prompts, s.templated
             );
         }
         Cmd::Stats => stats(&conn)?,
@@ -192,6 +178,42 @@ fn main() -> Result<()> {
         Cmd::Watch { install, uninstall } => watch(install, uninstall)?,
     }
     Ok(())
+}
+
+struct IngestStats {
+    zsh: usize,
+    claude: usize,
+    codex: usize,
+    prompts: usize,
+    templated: usize,
+    collapsed: usize,
+}
+
+/// Pull new history from every source, normalize, and de-overlap. Shared by the
+/// `ingest` command and the ambient `scan` so the background job needs no shell.
+fn ingest_all(conn: &rusqlite::Connection) -> Result<IngestStats> {
+    // once the shell hook is logging, its records supersede HISTFILE
+    // (same commands, richer fields) — don't ingest both
+    let hook_new = collect::hook::ingest(conn)?;
+    let zsh_path = dirs::home_dir().unwrap_or_default().join(".zsh_history");
+    let zsh = if !collect::hook::log_path().exists() && zsh_path.exists() {
+        collect::zsh::ingest(conn, &zsh_path)?
+    } else {
+        hook_new
+    };
+    let (claude, claude_prompts) = collect::claude::ingest(conn)?;
+    let (codex, codex_prompts) = collect::codex::ingest(conn)?;
+    let gemini_prompts = collect::gemini::ingest(conn)?;
+    let templated = normalize::run(conn)?;
+    let collapsed = mine::dedupe_sessions(conn)?;
+    Ok(IngestStats {
+        zsh,
+        claude,
+        codex,
+        prompts: claude_prompts + codex_prompts + gemini_prompts,
+        templated,
+        collapsed,
+    })
 }
 
 fn kind_icon(kind: &str) -> &'static str {
@@ -312,6 +334,8 @@ fn gain(conn: &rusqlite::Connection) -> Result<()> {
 
 fn scan(conn: &rusqlite::Connection) -> Result<()> {
     const NOTIFY_THRESHOLD: f64 = 8.0;
+    // pull fresh history first, so the background job is self-contained
+    ingest_all(conn)?;
     let cands = mine::candidates(conn, 5, None, false)?;
     let mut fresh = Vec::new();
     for c in &cands {
@@ -364,33 +388,42 @@ fn scan(conn: &rusqlite::Connection) -> Result<()> {
 }
 
 fn watch(install: bool, uninstall: bool) -> Result<()> {
+    const LABEL: &str = "dev.sisyphus.scan";
     let plist_path = dirs::home_dir()
         .context("no home dir")?
-        .join("Library/LaunchAgents/dev.sisyphus.scan.plist");
+        .join(format!("Library/LaunchAgents/{LABEL}.plist"));
+    // modern launchd is per-user-domain: gui/<uid>, driven by bootstrap/bootout
+    // (the old load/unload are deprecated and fail with "Input/output error")
+    let uid = unsafe { libc::getuid() };
+    let domain = format!("gui/{uid}");
+    let launchctl = |args: &[&str]| std::process::Command::new("launchctl").args(args).output();
+
     if uninstall {
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", &plist_path.display().to_string()])
-            .status();
+        let _ = launchctl(&["bootout", &format!("{domain}/{LABEL}")]);
         let _ = std::fs::remove_file(&plist_path);
         println!("watch removed");
         return Ok(());
     }
     if !install {
+        // is it actually loaded, not just present on disk?
+        let loaded = launchctl(&["print", &format!("{domain}/{LABEL}")])
+            .map(|o| o.status.success())
+            .unwrap_or(false);
         println!(
-            "installed: {}",
-            if plist_path.exists() { "yes" } else { "no — run `sisyphus watch --install`" }
+            "watch: {}",
+            if loaded { "running" } else { "not installed — run `sisyphus watch --install`" }
         );
         return Ok(());
     }
+
     let bin = std::env::current_exe()?;
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-    <key>Label</key><string>dev.sisyphus.scan</string>
+    <key>Label</key><string>{LABEL}</string>
     <key>ProgramArguments</key>
-    <array><string>/bin/sh</string><string>-c</string>
-    <string>"{bin}" ingest >/dev/null 2>&1 && "{bin}" scan</string></array>
+    <array><string>{bin}</string><string>scan</string></array>
     <key>StartInterval</key><integer>3600</integer>
     <key>RunAtLoad</key><false/>
 </dict></plist>
@@ -398,16 +431,17 @@ fn watch(install: bool, uninstall: bool) -> Result<()> {
         bin = bin.display()
     );
     std::fs::create_dir_all(plist_path.parent().unwrap())?;
-    std::fs::write(&plist_path, plist)?;
-    let status = std::process::Command::new("launchctl")
-        .args(["load", &plist_path.display().to_string()])
-        .status()?;
-    if status.success() {
-        println!("✓ hourly background scan installed ({})", plist_path.display());
-        println!("  note: uses the current binary path — reinstall after `cargo install`");
-    } else {
-        anyhow::bail!("launchctl load failed");
+    std::fs::write(&plist_path, &plist)?;
+
+    // replace any prior instance, then bootstrap the fresh one
+    let _ = launchctl(&["bootout", &format!("{domain}/{LABEL}")]);
+    let out = launchctl(&["bootstrap", &domain, &plist_path.to_string_lossy()])?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("launchctl bootstrap failed: {}", err.trim());
     }
+    println!("✓ hourly background scan installed ({})", plist_path.display());
+    println!("  note: uses the current binary path — reinstall after `cargo install`");
     Ok(())
 }
 
