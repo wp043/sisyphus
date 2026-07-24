@@ -22,7 +22,26 @@ pub fn template(cmd: &str) -> String {
         .join(" ")
 }
 
+/// Collapse an env-var assignment's value: `SP=/private/tmp/…` → `SP=<val>`,
+/// `export FOO=bar` → (on the `FOO=bar` token) `FOO=<val>`. Returns None when
+/// the token isn't a `NAME=value` assignment (so flags/URLs are untouched).
+fn normalize_assignment(tok: &str) -> Option<String> {
+    let eq = tok.find('=')?;
+    let name = &tok[..eq];
+    let looks_like_name = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    looks_like_name.then(|| format!("{name}=<val>"))
+}
+
 fn normalize_token(tok: &str, index: usize) -> String {
+    // an assignment can be the command itself (SP=…) or a prefix, so check it
+    // before the index==0 passthrough
+    if let Some(a) = normalize_assignment(tok) {
+        return a;
+    }
     if index == 0 || tok.starts_with('-') || matches!(tok, "&&" | "||" | "|" | ";" | ">") {
         return tok.to_string();
     }
@@ -81,6 +100,15 @@ mod tests {
         assert_eq!(template("cd ../foo"), "cd <path>");
         assert_eq!(template("curl https://x.dev/health"), "curl <path>");
         assert_eq!(template("kill 12345"), "kill <n>");
+    }
+
+    #[test]
+    fn collapses_env_assignments() {
+        assert_eq!(template("SP=/private/tmp/claude-501/x/y"), "SP=<val>");
+        assert_eq!(template("export ANTHROPIC_AUTH_TOKEN=ollama"), "export ANTHROPIC_AUTH_TOKEN=<val>");
+        assert_eq!(template("export PATH=\"/opt/homebrew/bin:$PATH\""), "export PATH=<val>");
+        // flags with = are not assignments
+        assert_eq!(template("cargo build --features=foo"), "cargo build --features=foo");
     }
 
     #[test]

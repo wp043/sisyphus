@@ -11,6 +11,17 @@ const MIN_COUNT: usize = 3;
 /// entirely of these is navigation noise, not a workflow.
 fn is_noise(tpl: &str) -> bool {
     let head = tpl.split_whitespace().next().unwrap_or("");
+    // env setup — `export …`, or a bare assignment as the command (SP=<val>) —
+    // is boilerplate (often an agent's PATH/token dance), not a workflow step
+    if head == "export" {
+        return true;
+    }
+    if let Some(eq) = head.find('=') {
+        let name = &head[..eq];
+        if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return true;
+        }
+    }
     // navigation/inspection that carries no automation signal, plus interactive
     // launchers (editors, agents, pagers) that are a destination, not a step
     matches!(head,
