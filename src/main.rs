@@ -90,6 +90,10 @@ enum Cmd {
     Hook {
         /// Shell to emit a hook for (only zsh currently)
         shell: String,
+        /// Also capture failed commands' stderr (opt-in; tees stderr, so
+        /// progress bars on stderr may render as plain output)
+        #[arg(long)]
+        errors: bool,
     },
     /// Fill the DB with synthetic multi-week history (for development/demo).
     /// Refuses to touch the real default DB.
@@ -161,8 +165,8 @@ fn main() -> Result<()> {
         Cmd::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "sisyphus", &mut std::io::stdout());
         }
-        Cmd::Hook { shell } => match shell.as_str() {
-            "zsh" => println!("{}", collect::hook::zsh_snippet()),
+        Cmd::Hook { shell, errors } => match shell.as_str() {
+            "zsh" => println!("{}", collect::hook::zsh_snippet(errors)),
             other => anyhow::bail!("unsupported shell {other:?} — only zsh for now"),
         },
         Cmd::Seed { days } => {

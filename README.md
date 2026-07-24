@@ -210,7 +210,7 @@ alternate database.
 
 | Source | Location | What's extracted |
 |--------|----------|------------------|
-| **zsh hook** | `eval "$(sisyphus hook zsh)"` in `~/.zshrc` | commands + timestamp, duration, exit code, cwd — the richest source; supersedes HISTFILE once active |
+| **zsh hook** | `eval "$(sisyphus hook zsh)"` in `~/.zshrc` | commands + timestamp, duration, exit code, cwd — the richest source; supersedes HISTFILE once active. Add `--errors` to also capture failed commands' stderr (opt-in; tees stderr, so progress bars there may render plain) |
 | **zsh** | `~/.zsh_history` | commands (+ timestamps if `EXTENDED_HISTORY` is set) |
 | **Claude Code** | `~/.claude/projects/*/*.jsonl` | Bash tool calls, prompts, Skill invocations, tool-result errors |
 | **Codex** | `~/.codex/sessions/**/rollout-*.jsonl` | exec/shell calls, prompts, failure output |
