@@ -92,6 +92,8 @@ pub fn zsh_snippet(capture_errors: bool) -> String {
 fn clean_err(raw: &str) -> Option<String> {
     static CSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[[0-9;?]*[A-Za-z]").unwrap());
     let cleaned = CSI.replace_all(raw, "");
+    // drop zsh's end-of-line prompt marker (a trailing reverse-video '%')
+    let cleaned = cleaned.trim_end().trim_end_matches('%');
     let trimmed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     (!trimmed.is_empty()).then_some(trimmed)
 }
