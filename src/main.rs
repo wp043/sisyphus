@@ -5,6 +5,7 @@ mod collect {
     pub mod hook;
     pub mod zsh;
 }
+mod config;
 mod db;
 mod doctor;
 mod draft;
@@ -38,9 +39,9 @@ enum Cmd {
     Stats,
     /// Mine history for repeated workflows and review them (full-screen TUI)
     Report {
-        /// How many patterns to show per kind
-        #[arg(short, long, default_value_t = 10)]
-        limit: usize,
+        /// How many patterns to show per kind (default: config [report] limit, else 10)
+        #[arg(short, long)]
+        limit: Option<usize>,
         /// Draft ALL undecided patterns with claude and install every draft
         #[arg(long)]
         auto: bool,
@@ -136,6 +137,7 @@ fn main() -> Result<()> {
         Cmd::Stats => stats(&conn)?,
         Cmd::Report { limit, auto, plain, project, json, semantic } => {
             let proj = project.as_deref();
+            let limit = limit.or(config::load().report.limit).unwrap_or(10);
             if json {
                 let cands = mine::candidates(&conn, limit, proj, semantic)?;
                 println!("{}", serde_json::to_string_pretty(&cands)?);
@@ -380,6 +382,12 @@ fn scan(conn: &rusqlite::Connection) -> Result<()> {
         (None, n) => format!("{n} accepted automation(s) aren't sticking. Run `sisyphus evolve`."),
     };
     println!("{msg}");
+    notify(&msg);
+    Ok(())
+}
+
+/// Desktop notification, best-effort and platform-specific.
+fn notify(msg: &str) {
     #[cfg(target_os = "macos")]
     {
         let script = format!(
@@ -388,10 +396,73 @@ fn scan(conn: &rusqlite::Connection) -> Result<()> {
         );
         let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
     }
-    Ok(())
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("notify-send").args(["sisyphus", msg]).status();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = msg;
 }
 
 fn watch(install: bool, uninstall: bool) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    return watch_linux(install, uninstall);
+    #[cfg(not(target_os = "linux"))]
+    watch_macos(install, uninstall)
+}
+
+/// systemd user timer on Linux — a per-user hourly `sisyphus scan`.
+#[cfg(target_os = "linux")]
+fn watch_linux(install: bool, uninstall: bool) -> Result<()> {
+    let dir = dirs::home_dir().context("no home dir")?.join(".config/systemd/user");
+    let svc = dir.join("sisyphus-scan.service");
+    let timer = dir.join("sisyphus-scan.timer");
+    let sc = |args: &[&str]| std::process::Command::new("systemctl").arg("--user").args(args).output();
+
+    if uninstall {
+        let _ = sc(&["disable", "--now", "sisyphus-scan.timer"]);
+        let _ = std::fs::remove_file(&svc);
+        let _ = std::fs::remove_file(&timer);
+        let _ = sc(&["daemon-reload"]);
+        println!("watch removed");
+        return Ok(());
+    }
+    if !install {
+        let active = sc(&["is-active", "sisyphus-scan.timer"])
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        println!(
+            "watch: {}",
+            if active { "running" } else { "not installed — run `sisyphus watch --install`" }
+        );
+        return Ok(());
+    }
+
+    let bin = std::env::current_exe()?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        &svc,
+        format!(
+            "[Unit]\nDescription=sisyphus scan\n\n[Service]\nType=oneshot\nExecStart={} scan\n",
+            bin.display()
+        ),
+    )?;
+    std::fs::write(
+        &timer,
+        "[Unit]\nDescription=sisyphus hourly scan\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec=1h\n\n[Install]\nWantedBy=timers.target\n",
+    )?;
+    let _ = sc(&["daemon-reload"]);
+    let out = sc(&["enable", "--now", "sisyphus-scan.timer"])?;
+    if !out.status.success() {
+        anyhow::bail!("systemctl enable failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    println!("✓ hourly background scan installed (systemd user timer)");
+    println!("  note: uses the current binary path — reinstall after `cargo install`");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn watch_macos(install: bool, uninstall: bool) -> Result<()> {
     const LABEL: &str = "dev.sisyphus.scan";
     let plist_path = dirs::home_dir()
         .context("no home dir")?

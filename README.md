@@ -411,6 +411,12 @@ prefer = "skill"         # "auto" (detect), "skill", or "script"
 commit = true            # after accepting an artifact, git-commit it to the
                          # repo that contains it (e.g. a dotfiles repo tracking
                          # ~/.claude/skills), with a conventional message
+
+[mine]
+min_minutes = 3          # hide command patterns cheaper than this (declutter)
+
+[report]
+limit = 8                # default patterns shown per kind (--limit overrides)
 ```
 
 The dashboard (`sisyphus serve`) uses the same palette: stat tiles, a

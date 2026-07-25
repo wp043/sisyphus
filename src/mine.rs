@@ -839,6 +839,9 @@ pub fn candidates(
         .filter(|p| !intent_asks.contains(&p.templates[0]))
         .collect();
 
+    // optional time floor: hide command patterns cheaper than N minutes
+    let min_secs = crate::config::load().mine.min_minutes * 60.0;
+
     let mut out = Vec::new();
     for (kind, patterns) in [
         ("sequence", mine(conn)?),
@@ -868,6 +871,10 @@ pub fn candidates(
                 .query_row("SELECT 1 FROM decisions WHERE pattern_id = ?1", params![id], |_| Ok(true))
                 .unwrap_or(false);
             if decided || kept >= limit_per_kind {
+                continue;
+            }
+            // prompt clusters carry no command-time score, so the floor skips them
+            if min_secs > 0.0 && kind != "prompt" && p.score < min_secs {
                 continue;
             }
             let pat_project = pattern_project(conn, &p.templates)?;
